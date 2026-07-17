@@ -624,7 +624,7 @@ describe('Factory Work and Review intake candidates', () => {
     const { router } = renderAt('/factory/work');
 
     const intake = await screen.findByTestId('board-column-intake');
-    const card = within(intake).getByRole('article', { name: 'Fix flaky test' });
+    const card = await within(intake).findByRole('article', { name: 'Fix flaky test' });
     await userEvent.click(within(card).getByRole('button', { name: 'More actions for Fix flaky test' }));
     await userEvent.click(await screen.findByRole('menuitem', { name: 'Triage issue' }));
 
@@ -845,7 +845,7 @@ describe('Factory Board — persisted cards', () => {
     const workCard = within(workColumn).getByTestId('work-item-card');
     expect(within(workCard).getByText('Issue:')).toBeInTheDocument();
     expect(within(workCard).queryByText('PR Review:')).not.toBeInTheDocument();
-    expect(within(workCard).getByText(/^Related /)).toBeInTheDocument();
+    expect(within(workCard).getByText('Review: PR #34')).toBeInTheDocument();
 
     const nav = screen.getByRole('navigation', { name: 'Factory' });
     await userEvent.click(within(nav).getByRole('link', { name: 'Review' }));
@@ -853,7 +853,7 @@ describe('Factory Board — persisted cards', () => {
     const reviewCard = within(column('review')).getByTestId('work-item-card');
     expect(within(reviewCard).getByText('PR Review:')).toBeInTheDocument();
     expect(within(reviewCard).queryByText('Issue:')).not.toBeInTheDocument();
-    expect(within(reviewCard).getByText(/^Related /)).toBeInTheDocument();
+    expect(within(reviewCard).getByText('Work item: Issue #12')).toBeInTheDocument();
   });
 
   // A project that still has the worktree the cards' session refs point at:
@@ -906,7 +906,7 @@ describe('Factory Board — persisted cards', () => {
       surface: 'Work',
       initialThreadId: THREAD_ID,
       initialWorktreePath: issueWorktreePath,
-      buttonName: 'Open related review session: Review fix flaky test',
+      buttonName: 'Open Review: PR #34: Review fix flaky test',
       destinationThreadId: 'thread-related-review',
       destinationWorktreePath: reviewWorktreePath,
     },
@@ -914,7 +914,7 @@ describe('Factory Board — persisted cards', () => {
       surface: 'Review',
       initialThreadId: 'thread-related-review',
       initialWorktreePath: reviewWorktreePath,
-      buttonName: 'Open related work session: Fix flaky test',
+      buttonName: 'Open Work item: Issue #12: Fix flaky test',
       destinationThreadId: THREAD_ID,
       destinationWorktreePath: issueWorktreePath,
     },
@@ -1734,6 +1734,7 @@ describe('Factory Board — investigate flow', () => {
     renderAt('/factory/work');
 
     const intake = await screen.findByTestId('board-column-intake');
+    await within(intake).findByText('Fix flaky test');
     await userEvent.click(within(intake).getByRole('button', { name: 'Investigate Fix flaky test' }));
 
     expect(await screen.findByRole('button', { name: /Show understand-issue skill contents/ })).toBeInTheDocument();
