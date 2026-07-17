@@ -960,7 +960,10 @@ describe('Factory Board — persisted cards', () => {
 
     await screen.findByTestId('board-column-intake');
     const card = within(column('execute')).getByTestId('work-item-card');
-    expect(within(card).getByRole('link', { name: 'Fix flaky test' })).toHaveAttribute('href', '/threads/thread-work');
+    expect(within(card).getByRole('link', { name: 'Issue: Fix flaky test' })).toHaveAttribute(
+      'href',
+      '/threads/thread-work',
+    );
   });
 
   it('given plan and work sessions on the same thread, when the Board renders, then the card shows a single thread link', async () => {
@@ -983,7 +986,7 @@ describe('Factory Board — persisted cards', () => {
     const card = within(column('execute')).getByTestId('work-item-card');
     const links = within(card).getAllByRole('link');
     expect(links).toHaveLength(1);
-    expect(links[0]).toHaveAccessibleName('Fix flaky test');
+    expect(links[0]).toHaveAccessibleName('Issue: Fix flaky test');
     expect(links[0]).toHaveAttribute('href', '/threads/thread-shared');
   });
 
@@ -1008,7 +1011,7 @@ describe('Factory Board — persisted cards', () => {
     const card = within(column('execute')).getByTestId('work-item-card');
     const links = within(card).getAllByRole('link');
     expect(links).toHaveLength(1);
-    expect(links[0]).toHaveAccessibleName('Fix flaky test');
+    expect(links[0]).toHaveAccessibleName('Issue: Fix flaky test');
     // The last-filed ref wins until the next run converges them.
     expect(links[0]).toHaveAttribute('href', '/threads/thread-work');
   });
@@ -1034,7 +1037,7 @@ describe('Factory Board — persisted cards', () => {
     const card = within(column('execute')).getByTestId('work-item-card');
     // The stale ref renders no thread link: the title is a create-session button.
     expect(within(card).queryByRole('link')).not.toBeInTheDocument();
-    expect(within(card).getByRole('button', { name: 'Fix flaky test' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Issue: Fix flaky test' })).toBeInTheDocument();
     // The stale ref no longer occupies the run slot: runs are offered again.
     await userEvent.click(within(card).getByRole('button', { name: 'Actions for Fix flaky test' }));
     expect(await screen.findByRole('menuitem', { name: 'Investigate' })).toBeInTheDocument();
@@ -1070,7 +1073,7 @@ describe('Factory Board — persisted cards', () => {
 
     await screen.findByTestId('board-column-intake');
     const card = within(column('execute')).getByTestId('work-item-card');
-    await userEvent.click(within(card).getByRole('link', { name: 'Fix flaky test' }));
+    await userEvent.click(within(card).getByRole('link', { name: 'Issue: Fix flaky test' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/threads/thread-work'));
     const stored = JSON.parse(localStorage.getItem('mastracode-projects') ?? '[]') as Project[];
@@ -2127,7 +2130,7 @@ describe('Factory Board — open session from the card title', () => {
 
     await screen.findByTestId('board-column-intake');
     const card = within(column('intake')).getByTestId('work-item-card');
-    await userEvent.click(within(card).getByRole('button', { name: 'Fix flaky test' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Issue: Fix flaky test' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/threads/thread-factory'));
     expect(captured.worktree).toMatchObject({ branch: 'factory/issue-12' });
@@ -2172,7 +2175,7 @@ describe('Factory Board — open session from the card title', () => {
 
     await screen.findByTestId('board-column-intake');
     const card = within(column('execute')).getByTestId('work-item-card');
-    await userEvent.click(within(card).getByRole('button', { name: 'Fix flaky test' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Issue: Fix flaky test' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/threads/thread-factory'));
     expect(captured.messages).toEqual([]);
@@ -2191,7 +2194,7 @@ describe('Factory Board — open session from the card title', () => {
 
     const intake = await screen.findByTestId('board-column-intake');
     await within(intake).findByText('Fix flaky test');
-    await userEvent.click(within(intake).getByRole('button', { name: 'Fix flaky test' }));
+    await userEvent.click(within(intake).getByRole('button', { name: 'Issue: Fix flaky test' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/threads/thread-factory'));
     expect(captured.worktree).toMatchObject({ branch: 'factory/issue-12' });
@@ -2218,7 +2221,7 @@ describe('Factory Board — open session from the card title', () => {
 
     await screen.findByTestId('board-column-intake');
     const card = within(column('intake')).getByTestId('work-item-card');
-    await userEvent.click(within(card).getByRole('button', { name: 'Manual card' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Manual: Manual card' }));
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/threads/thread-factory'));
     expect(captured.worktree).toMatchObject({ branch: 'factory/item-wi-manual' });
@@ -2254,7 +2257,10 @@ describe('Factory Board — open session from the card title', () => {
 
     await screen.findByTestId('board-column-intake');
     const card = within(column('intake')).getByTestId('work-item-card');
-    expect(within(card).getByRole('link', { name: 'Fix flaky test' })).toHaveAttribute('href', '/threads/thread-work');
+    expect(within(card).getByRole('link', { name: 'Issue: Fix flaky test' })).toHaveAttribute(
+      'href',
+      '/threads/thread-work',
+    );
     // A chat session occupies no run slot: Investigate and Build stay offered.
     await userEvent.click(within(card).getByRole('button', { name: 'Actions for Fix flaky test' }));
     expect(await screen.findByRole('menuitem', { name: 'Investigate' })).toBeInTheDocument();
