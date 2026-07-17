@@ -40,6 +40,7 @@ export function StatusLine() {
         resourceId={resourceId}
         projectPath={projectPath}
         githubProjectId={activeProject?.githubProjectId}
+        githubProjectName={activeProject?.name}
         threadId={threadId}
         transcriptEntries={transcript.entries}
         busy={busy}
