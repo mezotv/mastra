@@ -12,7 +12,7 @@ import {
   useActiveProjectContext,
 } from '../workspaces';
 import { ChatHeader } from './components/ChatHeader';
-import { RelatedFactorySessions } from '../factory/components/RelatedFactorySessions';
+import { FactorySessionHeader } from '../factory/components/RelatedFactorySessions';
 import { ChatMessageList } from './components/ChatMessageList';
 import { ChatOverlays } from './components/ChatOverlays';
 import { ComposerPanel } from './components/ComposerPanel';
@@ -98,7 +98,7 @@ function ThreadPageContent() {
 
   return (
     <div className="flex min-h-0 flex-col">
-      <RelatedFactorySessions />
+      <FactorySessionHeader />
       <div className="min-h-0 flex-1 overflow-hidden">
         <ChatMessageList />
       </div>
