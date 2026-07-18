@@ -192,6 +192,7 @@ describe('WorkItemsStoragePG relations', () => {
     expect(WORK_ITEMS_DDL).toContain('ON DELETE SET NULL');
     expect(WORK_ITEMS_DDL).toContain('ON work_items (org_id, github_project_id, parent_work_item_id)');
     expect(WORK_ITEMS_DDL).toContain("conrelid = 'work_items'::regclass");
+    expect(WORK_ITEMS_DDL).toContain('WHEN duplicate_object THEN NULL');
   });
 
   it('takes the project advisory lock before locking and validating a relation update', async () => {
@@ -228,6 +229,7 @@ describe('WorkItemsStoragePG relations', () => {
   it('serializes a parent update racing with deletion on the shared project lock', async () => {
     const item = dbRow(ITEM_ID);
     const parent = dbRow(PARENT_ID);
+    let deleted = false;
     let connectionCount = 0;
     let lockOwner: number | undefined;
     const lockWaiters: Array<() => void> = [];
@@ -268,9 +270,14 @@ describe('WorkItemsStoragePG relations', () => {
             if (sql.startsWith('SELECT * FROM work_items WHERE id = $1 AND org_id = $2')) {
               return { rows: [item] };
             }
-            if (sql === 'SELECT * FROM work_items WHERE id = $1 FOR UPDATE') return { rows: [item] };
+            if (sql === 'SELECT * FROM work_items WHERE id = $1 FOR UPDATE') {
+              return { rows: deleted ? [] : [item] };
+            }
             if (sql.startsWith('SELECT * FROM work_items WHERE org_id = $1')) return { rows: [item, parent] };
-            if (sql.startsWith('DELETE FROM work_items')) return { rows: [item] };
+            if (sql.startsWith('DELETE FROM work_items')) {
+              deleted = true;
+              return { rows: [item] };
+            }
             if (sql.startsWith('UPDATE work_items SET')) {
               return { rows: [{ ...item, parent_work_item_id: PARENT_ID }] };
             }
@@ -298,6 +305,6 @@ describe('WorkItemsStoragePG relations', () => {
 
     releaseDeleteRowLock();
     await expect(deleting).resolves.toMatchObject({ id: ITEM_ID });
-    await expect(updating).resolves.toMatchObject({ item: { parentWorkItemId: PARENT_ID } });
+    await expect(updating).resolves.toBeNull();
   });
 });

@@ -56,9 +56,13 @@ BEGIN
     WHERE conname = 'work_items_parent_work_item_id_fkey'
       AND conrelid = 'work_items'::regclass
   ) THEN
-    ALTER TABLE work_items
-      ADD CONSTRAINT work_items_parent_work_item_id_fkey
-      FOREIGN KEY (parent_work_item_id) REFERENCES work_items(id) ON DELETE SET NULL;
+    BEGIN
+      ALTER TABLE work_items
+        ADD CONSTRAINT work_items_parent_work_item_id_fkey
+        FOREIGN KEY (parent_work_item_id) REFERENCES work_items(id) ON DELETE SET NULL;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END;
   END IF;
 END $$;
 
