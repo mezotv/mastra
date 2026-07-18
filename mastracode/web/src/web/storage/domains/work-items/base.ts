@@ -103,6 +103,33 @@ export interface FactoryRuleIngressRecord {
   createdAt: Date;
 }
 
+export interface CommitFactoryRuleEvaluationInput {
+  orgId: string;
+  githubProjectId: string;
+  workItemId: string;
+  ingress: { identity: string; triggerType: string };
+  ruleSetVersion: string;
+  expectedRevision: number;
+  outcome: { status: 'accepted' | 'rejected'; code?: string; reason?: string };
+  decisions: Record<string, unknown>[];
+  causalChain: Array<{ ingressId: string; decisionType: string }>;
+  now: Date;
+}
+
+export type CommitFactoryRuleEvaluationResult =
+  | { status: 'committed'; result: Record<string, unknown> }
+  | { status: 'replayed'; result: Record<string, unknown> }
+  | { status: 'missing' };
+
+export interface FactoryToolResultCursorRecord {
+  bindingId: string;
+  orgId: string;
+  githubProjectId: string;
+  lastMessageId: string;
+  lastMessageCreatedAt: Date;
+  updatedAt: Date;
+}
+
 export interface FactoryRuleEvaluationRecord {
   id: string;
   ingressId: string;
@@ -112,6 +139,7 @@ export interface FactoryRuleEvaluationRecord {
   outcome: 'accepted' | 'rejected';
   code: string | null;
   reason: string | null;
+  causalChain: Array<{ ingressId: string; decisionType: string }>;
   createdAt: Date;
 }
 
@@ -139,12 +167,15 @@ export interface FactoryDeferredDecisionRecord {
   updatedAt: Date;
 }
 
-export interface FactoryRunBindingAddress {
-  orgId: string;
+export interface FactoryRunBindingSessionAddress {
   githubProjectId: string;
   threadId: string;
   resourceId: string;
   projectPath: string;
+}
+
+export interface FactoryRunBindingAddress extends FactoryRunBindingSessionAddress {
+  orgId: string;
 }
 
 export interface RevokeFactoryRunBindingInput {
@@ -414,6 +445,17 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   /** Atomically dedupe ingress, compare-and-set the item, and persist evaluation/outbox state. */
   abstract commitTransition(input: CommitFactoryTransitionInput): Promise<CommitFactoryTransitionResult>;
 
+  /** Atomically dedupe a non-transition rule ingress and persist evaluation/outbox state. */
+  abstract commitRuleEvaluation(input: CommitFactoryRuleEvaluationInput): Promise<CommitFactoryRuleEvaluationResult>;
+
+  /** Read and advance the bounded transcript reconciliation cursor for one binding. */
+  abstract getToolResultCursor(
+    orgId: string,
+    githubProjectId: string,
+    bindingId: string,
+  ): Promise<FactoryToolResultCursorRecord | null>;
+  abstract advanceToolResultCursor(cursor: FactoryToolResultCursorRecord): Promise<void>;
+
   /** List durable deferred decisions for audit and recovery. */
   abstract listDeferredDecisions(orgId: string, githubProjectId: string): Promise<FactoryDeferredDecisionRecord[]>;
 
@@ -435,8 +477,16 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   /** Resolve exact active agent authority; partial session matches never authorize. */
   abstract findActiveRunBinding(address: FactoryRunBindingAddress): Promise<FactoryRunBindingRecord | null>;
 
+  /** Resolve exact bound-session state for processor awareness; ambiguous cross-tenant matches return null. */
+  abstract findRunBindingBySession(
+    address: FactoryRunBindingSessionAddress,
+  ): Promise<FactoryRunBindingRecord | null>;
+
   /** Revoke one exact tenant-scoped binding. */
   abstract revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null>;
+
+  /** Enumerate active bindings for the server-owned restart reconciler. */
+  abstract listActiveRunBindings(): Promise<FactoryRunBindingRecord[]>;
 
   /** List binding history, optionally narrowed to one work item. */
   abstract listRunBindings(

@@ -20,6 +20,8 @@ import {
   validateParentRelation,
 } from './base';
 import type {
+  CommitFactoryRuleEvaluationInput,
+  CommitFactoryRuleEvaluationResult,
   CommitFactoryTransitionInput,
   CommitFactoryTransitionResult,
   CreateWorkItemInput,
@@ -28,8 +30,10 @@ import type {
   FactoryLeaseClaimInput,
   FactoryLeaseIdentity,
   FactoryPendingStartRecord,
+  FactoryToolResultCursorRecord,
   FactoryRunBindingAddress,
   FactoryRunBindingRecord,
+  FactoryRunBindingSessionAddress,
   PrepareFactoryRunStartInput,
   RevokeFactoryRunBindingInput,
   PrepareFactoryRunStartResult,
@@ -84,8 +88,11 @@ CREATE TABLE IF NOT EXISTS factory_rule_evaluations (
   outcome text NOT NULL,
   code text,
   reason text,
+  causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE factory_rule_evaluations
+  ADD COLUMN IF NOT EXISTS causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS factory_deferred_decisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -160,6 +167,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS factory_run_bindings_active_role_unique
 CREATE UNIQUE INDEX IF NOT EXISTS factory_run_bindings_active_thread_unique
   ON factory_run_bindings (org_id, thread_id)
   WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS factory_tool_result_cursors (
+  binding_id uuid PRIMARY KEY REFERENCES factory_run_bindings(id) ON DELETE CASCADE,
+  org_id text NOT NULL,
+  github_project_id uuid NOT NULL,
+  last_message_id text NOT NULL,
+  last_message_created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS factory_pending_starts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -249,6 +265,15 @@ interface RunBindingDbRow {
   revoked_at: Date | null;
 }
 
+interface ToolResultCursorDbRow {
+  binding_id: string;
+  org_id: string;
+  github_project_id: string;
+  last_message_id: string;
+  last_message_created_at: Date;
+  updated_at: Date;
+}
+
 interface DeferredDecisionDbRow {
   id: string;
   org_id: string;
@@ -303,6 +328,17 @@ function toBinding(row: RunBindingDbRow): FactoryRunBindingRecord {
     status: row.status,
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
+  };
+}
+
+function toToolResultCursor(row: ToolResultCursorDbRow): FactoryToolResultCursorRecord {
+  return {
+    bindingId: row.binding_id,
+    orgId: row.org_id,
+    githubProjectId: row.github_project_id,
+    lastMessageId: row.last_message_id,
+    lastMessageCreatedAt: row.last_message_created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -600,10 +636,20 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       );
       const evaluation = await client.query<{ id: string }>(
         `INSERT INTO factory_rule_evaluations
-           (ingress_id, work_item_id, rule_set_version, expected_revision, outcome, code, reason, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           (ingress_id, work_item_id, rule_set_version, expected_revision, outcome, code, reason, causal_chain, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
          RETURNING id`,
-        [ingress.rows[0]!.id, existing.id, input.ruleSetVersion, input.expectedRevision, outcome, code, reason, now],
+        [
+          ingress.rows[0]!.id,
+          existing.id,
+          input.ruleSetVersion,
+          input.expectedRevision,
+          outcome,
+          code,
+          reason,
+          JSON.stringify(input.causalChain),
+          now,
+        ],
       );
       if (outcome === 'accepted' && input.evaluation.outcome === 'accepted') {
         for (const [effectOrdinal, decision] of input.evaluation.decisions.entries()) {
@@ -631,6 +677,124 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       }
       return { status: 'committed', item, result };
     });
+  }
+
+  async commitRuleEvaluation(input: CommitFactoryRuleEvaluationInput): Promise<CommitFactoryRuleEvaluationResult> {
+    return this.#withTx(async client => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `${input.orgId}:${input.githubProjectId}:${input.ingress.identity}`,
+      ]);
+      const prior = await client.query<RuleIngressDbRow>(
+        'SELECT id, result FROM factory_rule_ingress WHERE org_id = $1 AND github_project_id = $2 AND identity = $3',
+        [input.orgId, input.githubProjectId, input.ingress.identity],
+      );
+      if (prior.rows[0]) return { status: 'replayed', result: prior.rows[0].result };
+
+      const itemResult = await client.query<WorkItemDbRow>(
+        'SELECT * FROM work_items WHERE org_id = $1 AND github_project_id = $2 AND id = $3 FOR UPDATE',
+        [input.orgId, input.githubProjectId, input.workItemId],
+      );
+      const item = itemResult.rows[0];
+      if (!item) return { status: 'missing' };
+
+      const stale = item.revision !== input.expectedRevision;
+      const outcome = stale ? 'rejected' : input.outcome.status;
+      const code = stale ? 'stale' : (input.outcome.code ?? null);
+      const reason = stale
+        ? 'The work item changed before this rule evaluation committed.'
+        : (input.outcome.reason ?? null);
+      const decisions = outcome === 'accepted' ? input.decisions : [];
+      const result = { status: outcome, itemId: item.id, revision: item.revision, code, reason, decisions };
+      const ingress = await client.query<{ id: string }>(
+        `INSERT INTO factory_rule_ingress
+           (org_id, github_project_id, identity, trigger_type, transition_id, result, created_at)
+         VALUES ($1, $2, $3, $4, gen_random_uuid(), $5::jsonb, $6)
+         RETURNING id`,
+        [
+          input.orgId,
+          input.githubProjectId,
+          input.ingress.identity,
+          input.ingress.triggerType,
+          JSON.stringify(result),
+          input.now,
+        ],
+      );
+      const evaluation = await client.query<{ id: string }>(
+        `INSERT INTO factory_rule_evaluations
+           (ingress_id, work_item_id, rule_set_version, expected_revision, outcome, code, reason, causal_chain, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+         RETURNING id`,
+        [
+          ingress.rows[0]!.id,
+          item.id,
+          input.ruleSetVersion,
+          input.expectedRevision,
+          outcome,
+          code,
+          reason,
+          JSON.stringify(input.causalChain),
+          input.now,
+        ],
+      );
+      for (const [effectOrdinal, decision] of decisions.entries()) {
+        await client.query(
+          `INSERT INTO factory_deferred_decisions
+             (org_id, github_project_id, evaluation_id, work_item_id, idempotency_key,
+              effect_ordinal, effect_hash, causal_chain, decision, status, attempts, available_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, 'pending', 0, $10, $10, $10)
+           ON CONFLICT (org_id, github_project_id, idempotency_key) DO NOTHING`,
+          [
+            input.orgId,
+            input.githubProjectId,
+            evaluation.rows[0]!.id,
+            item.id,
+            String(decision.idempotencyKey),
+            effectOrdinal,
+            factoryDecisionHash(decision),
+            JSON.stringify(input.causalChain),
+            JSON.stringify(decision),
+            input.now,
+          ],
+        );
+      }
+      return { status: 'committed', result };
+    });
+  }
+
+  async getToolResultCursor(
+    orgId: string,
+    githubProjectId: string,
+    bindingId: string,
+  ): Promise<FactoryToolResultCursorRecord | null> {
+    const { rows } = await this.#db.query<ToolResultCursorDbRow>(
+      `SELECT * FROM factory_tool_result_cursors
+       WHERE org_id = $1 AND github_project_id = $2 AND binding_id = $3`,
+      [orgId, githubProjectId, bindingId],
+    );
+    return rows[0] ? toToolResultCursor(rows[0]) : null;
+  }
+
+  async advanceToolResultCursor(cursor: FactoryToolResultCursorRecord): Promise<void> {
+    await this.#db.query(
+      `INSERT INTO factory_tool_result_cursors
+         (binding_id, org_id, github_project_id, last_message_id, last_message_created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (binding_id) DO UPDATE SET
+         last_message_id = EXCLUDED.last_message_id,
+         last_message_created_at = EXCLUDED.last_message_created_at,
+         updated_at = EXCLUDED.updated_at
+       WHERE factory_tool_result_cursors.org_id = EXCLUDED.org_id
+         AND factory_tool_result_cursors.github_project_id = EXCLUDED.github_project_id
+         AND factory_tool_result_cursors.last_message_created_at <= EXCLUDED.last_message_created_at`,
+      [
+        cursor.bindingId,
+        cursor.orgId,
+        cursor.githubProjectId,
+        cursor.lastMessageId,
+        cursor.lastMessageCreatedAt,
+        cursor.updatedAt,
+      ],
+    );
   }
 
   async listDeferredDecisions(orgId: string, githubProjectId: string): Promise<FactoryDeferredDecisionRecord[]> {
@@ -729,6 +893,18 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
     return rows[0] ? toBinding(rows[0]) : null;
   }
 
+  async findRunBindingBySession(address: FactoryRunBindingSessionAddress): Promise<FactoryRunBindingRecord | null> {
+    const { rows } = await this.#db.query<RunBindingDbRow>(
+      `SELECT * FROM factory_run_bindings
+       WHERE github_project_id = $1 AND thread_id = $2 AND resource_id = $3 AND project_path = $4
+       ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
+       LIMIT 2`,
+      [address.githubProjectId, address.threadId, address.resourceId, address.projectPath],
+    );
+    if (!rows[0] || (rows[1] && rows[1].org_id !== rows[0].org_id)) return null;
+    return toBinding(rows[0]);
+  }
+
   async revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null> {
     const { rows } = await this.#db.query<RunBindingDbRow>(
       `UPDATE factory_run_bindings
@@ -738,6 +914,13 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       [input.bindingId, input.orgId, input.githubProjectId, input.revokedAt],
     );
     return rows[0] ? toBinding(rows[0]) : null;
+  }
+
+  async listActiveRunBindings(): Promise<FactoryRunBindingRecord[]> {
+    const { rows } = await this.#db.query<RunBindingDbRow>(
+      `SELECT * FROM factory_run_bindings WHERE status = 'active' ORDER BY created_at ASC`,
+    );
+    return rows.map(toBinding);
   }
 
   async listRunBindings(

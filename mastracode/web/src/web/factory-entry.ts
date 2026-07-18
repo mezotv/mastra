@@ -32,6 +32,7 @@ import { buildAuthRoutes, createWebAuthGate } from './auth.js';
 import type { FactoryIntegration, IntegrationTools } from './factory-integration.js';
 import { builtInFactoryRules } from './factory/rules/defaults.js';
 import { FactoryDecisionDispatcher } from './factory/rules/dispatcher.js';
+import { FactoryPhaseStateProcessor } from './factory/rules/processor.js';
 import { createFactoryTransitionTools } from './factory/rules/tools.js';
 import { FactoryTransitionService } from './factory/rules/transition-service.js';
 import type { FactoryRules } from './factory/rules/types.js';
@@ -180,6 +181,7 @@ export class MastraFactory {
   readonly #config: MastraFactoryConfig;
   #prepared: Awaited<ReturnType<typeof prepareAgentControllerMount>> | undefined;
   #dispatcher: FactoryDecisionDispatcher | undefined;
+  #factoryProcessor: FactoryPhaseStateProcessor | undefined;
   #preparing = false;
 
   constructor(config: MastraFactoryConfig = {}) {
@@ -331,6 +333,23 @@ export class MastraFactory {
     const transitionService = workItemsStorage
       ? new FactoryTransitionService({ rules, storage: workItemsStorage })
       : undefined;
+    const factoryProcessor = workItemsStorage
+      ? new FactoryPhaseStateProcessor({
+          rules,
+          storage: workItemsStorage,
+          ...(transitionService ? { transitionService } : {}),
+          ...(storage
+            ? {
+                messageReader: {
+                  listMessages: async input => {
+                    const memory = await storage.getStore('memory');
+                    return memory ? memory.listMessages(input) : { messages: [], hasMore: false };
+                  },
+                },
+              }
+            : {}),
+        })
+      : undefined;
 
     // Per-integration readiness. The built-ins keep their composite gates
     // (auth + app DB + signer stability); custom integrations are ready when
@@ -381,6 +400,7 @@ export class MastraFactory {
       controllerId: CONTROLLER_ID,
       workspace: getFactoryWorkspace,
       disableGithubSignals: true,
+      ...(factoryProcessor ? { inputProcessors: [factoryProcessor] } : {}),
       ...(storage ? { storage } : {}),
       ...(vector ? { vector } : {}),
       ...(toolIntegrations.length > 0 || (workItemsStorage && transitionService)
@@ -473,6 +493,7 @@ export class MastraFactory {
               controller,
               transitionService: runtimeTransitionService,
               storage: getFactoryStore().workItems,
+              reconcileToolResults: () => factoryProcessor?.reconcileAllBoundThreads() ?? Promise.resolve(),
             });
           },
         }),
@@ -509,6 +530,7 @@ export class MastraFactory {
     });
 
     this.#prepared = prepared;
+    this.#factoryProcessor = factoryProcessor;
     return prepared.mastraArgs;
   }
 
@@ -522,6 +544,7 @@ export class MastraFactory {
       throw new Error('MastraFactory.finalize() called before prepare()');
     }
     await this.#prepared.finalize();
+    await this.#factoryProcessor?.reconcileAllBoundThreads();
     this.#dispatcher?.start();
   }
 

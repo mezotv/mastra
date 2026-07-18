@@ -15,6 +15,8 @@ import {
   validateParentRelation,
 } from './base';
 import type {
+  CommitFactoryRuleEvaluationInput,
+  CommitFactoryRuleEvaluationResult,
   CommitFactoryTransitionInput,
   CommitFactoryTransitionResult,
   CreateWorkItemInput,
@@ -25,8 +27,10 @@ import type {
   FactoryPendingStartRecord,
   FactoryRuleEvaluationRecord,
   FactoryRuleIngressRecord,
+  FactoryToolResultCursorRecord,
   FactoryRunBindingAddress,
   FactoryRunBindingRecord,
+  FactoryRunBindingSessionAddress,
   PrepareFactoryRunStartInput,
   RevokeFactoryRunBindingInput,
   PrepareFactoryRunStartResult,
@@ -43,6 +47,7 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
   #decisions = new Map<string, FactoryDeferredDecisionRecord>();
   #bindings = new Map<string, FactoryRunBindingRecord>();
   #pendingStarts = new Map<string, FactoryPendingStartRecord>();
+  #toolResultCursors = new Map<string, FactoryToolResultCursorRecord>();
 
   async init(): Promise<void> {
     // Nothing to set up.
@@ -216,9 +221,97 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       outcome,
       code,
       reason,
+      causalChain: structuredClone(input.causalChain),
       createdAt: now,
     });
     return { status: 'committed', item: this.#clone(updated), result };
+  }
+
+  async commitRuleEvaluation(input: CommitFactoryRuleEvaluationInput): Promise<CommitFactoryRuleEvaluationResult> {
+    const ingressKey = `${input.orgId}:${input.githubProjectId}:${input.ingress.identity}`;
+    const priorIngress = this.#ingress.get(ingressKey);
+    if (priorIngress) return { status: 'replayed', result: structuredClone(priorIngress.result) };
+    const item = this.#items.get(input.workItemId);
+    if (!item || item.orgId !== input.orgId || item.githubProjectId !== input.githubProjectId) {
+      return { status: 'missing' };
+    }
+
+    const ingressId = randomUUID();
+    const evaluationId = randomUUID();
+    const stale = item.revision !== input.expectedRevision;
+    const outcome = stale ? 'rejected' : input.outcome.status;
+    const code = stale ? 'stale' : (input.outcome.code ?? null);
+    const reason = stale
+      ? 'The work item changed before this rule evaluation committed.'
+      : (input.outcome.reason ?? null);
+    const decisions = outcome === 'accepted' ? input.decisions : [];
+    const result = { status: outcome, itemId: item.id, revision: item.revision, code, reason, decisions };
+
+    this.#ingress.set(ingressKey, {
+      id: ingressId,
+      orgId: input.orgId,
+      githubProjectId: input.githubProjectId,
+      identity: input.ingress.identity,
+      triggerType: input.ingress.triggerType,
+      transitionId: input.ingress.identity,
+      result: structuredClone(result),
+      createdAt: input.now,
+    });
+    this.#evaluations.set(evaluationId, {
+      id: evaluationId,
+      ingressId,
+      workItemId: item.id,
+      ruleSetVersion: input.ruleSetVersion,
+      expectedRevision: input.expectedRevision,
+      outcome,
+      code,
+      reason,
+      causalChain: structuredClone(input.causalChain),
+      createdAt: input.now,
+    });
+    for (const [effectOrdinal, decision] of decisions.entries()) {
+      const idempotencyKey = String(decision.idempotencyKey);
+      const key = `${input.orgId}:${input.githubProjectId}:${idempotencyKey}`;
+      if (this.#decisions.has(key)) continue;
+      this.#decisions.set(key, {
+        id: randomUUID(),
+        orgId: input.orgId,
+        githubProjectId: input.githubProjectId,
+        evaluationId,
+        workItemId: item.id,
+        idempotencyKey,
+        effectOrdinal,
+        effectHash: factoryDecisionHash(decision),
+        causalChain: structuredClone(input.causalChain),
+        decision: structuredClone(decision),
+        status: 'pending',
+        attempts: 0,
+        availableAt: input.now,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastError: null,
+        completedAt: null,
+        createdAt: input.now,
+        updatedAt: input.now,
+      });
+    }
+    return { status: 'committed', result };
+  }
+
+  async getToolResultCursor(
+    orgId: string,
+    githubProjectId: string,
+    bindingId: string,
+  ): Promise<FactoryToolResultCursorRecord | null> {
+    const cursor = this.#toolResultCursors.get(`${orgId}:${githubProjectId}:${bindingId}`);
+    return cursor ? structuredClone(cursor) : null;
+  }
+
+  async advanceToolResultCursor(cursor: FactoryToolResultCursorRecord): Promise<void> {
+    const key = `${cursor.orgId}:${cursor.githubProjectId}:${cursor.bindingId}`;
+    const current = this.#toolResultCursors.get(key);
+    if (current && current.lastMessageCreatedAt > cursor.lastMessageCreatedAt) return;
+    this.#toolResultCursors.set(key, structuredClone(cursor));
   }
 
   async listDeferredDecisions(orgId: string, githubProjectId: string): Promise<FactoryDeferredDecisionRecord[]> {
@@ -323,6 +416,19 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     return binding ? structuredClone(binding) : null;
   }
 
+  async findRunBindingBySession(address: FactoryRunBindingSessionAddress): Promise<FactoryRunBindingRecord | null> {
+    const matches = [...this.#bindings.values()].filter(
+      candidate =>
+        candidate.githubProjectId === address.githubProjectId &&
+        candidate.threadId === address.threadId &&
+        candidate.resourceId === address.resourceId &&
+        candidate.projectPath === address.projectPath,
+    );
+    if (new Set(matches.map(binding => binding.orgId)).size !== 1) return null;
+    const binding = matches.find(candidate => candidate.status === 'active') ?? matches.at(-1);
+    return binding ? structuredClone(binding) : null;
+  }
+
   async revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null> {
     const binding = this.#bindings.get(input.bindingId);
     if (
@@ -336,6 +442,12 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     const revoked = { ...binding, status: 'revoked' as const, revokedAt: input.revokedAt };
     this.#bindings.set(binding.id, revoked);
     return structuredClone(revoked);
+  }
+
+  async listActiveRunBindings(): Promise<FactoryRunBindingRecord[]> {
+    return [...this.#bindings.values()]
+      .filter(binding => binding.status === 'active')
+      .map(binding => structuredClone(binding));
   }
 
   async listRunBindings(

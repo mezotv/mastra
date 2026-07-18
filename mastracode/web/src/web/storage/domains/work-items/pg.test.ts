@@ -348,11 +348,22 @@ describe('WorkItemsStoragePG', () => {
       }),
     ).resolves.toMatchObject({ id: 'binding-1', status: 'active' });
     await expect(
+      domain.findRunBindingBySession({
+        githubProjectId: 'p1',
+        threadId: 'thread-1',
+        resourceId: 'resource-1',
+        projectPath: '/worktree',
+      }),
+    ).resolves.toMatchObject({ id: 'binding-1', status: 'active' });
+    await expect(
       domain.revokeRunBinding({ orgId: 'org1', githubProjectId: 'p1', bindingId: 'binding-1', revokedAt: now }),
     ).resolves.toMatchObject({ id: 'binding-1', status: 'revoked', revokedAt: now });
 
-    const lookup = queries.find(query => query.text.includes('SELECT * FROM factory_run_bindings'))!;
-    expect(lookup.values).toEqual(['org1', 'p1', 'thread-1', 'resource-1', '/worktree']);
+    const lookups = queries.filter(query => query.text.includes('SELECT * FROM factory_run_bindings'));
+    expect(lookups[0]?.values).toEqual(['org1', 'p1', 'thread-1', 'resource-1', '/worktree']);
+    expect(lookups[1]?.values).toEqual(['p1', 'thread-1', 'resource-1', '/worktree']);
+    expect(lookups[1]?.text).toContain('created_at DESC');
+    expect(lookups[1]?.text).not.toContain('updated_at');
     const revoke = queries.find(query => query.text.includes('UPDATE factory_run_bindings'))!;
     expect(revoke.values).toEqual(['binding-1', 'org1', 'p1', now]);
   });
@@ -493,6 +504,71 @@ describe('WorkItemsStoragePG relations', () => {
     const rowLockIndex = queries.findIndex(sql => sql === 'SELECT * FROM work_items WHERE id = $1 FOR UPDATE');
     expect(advisoryIndex).toBeGreaterThan(-1);
     expect(rowLockIndex).toBeGreaterThan(advisoryIndex);
+  });
+
+  it('commits generic rule ingress, evaluation, and deferred decisions atomically', async () => {
+    const { queries, ctx } = fakePool(text => {
+      if (text.includes('FROM factory_rule_ingress')) return { rows: [] };
+      if (text.includes('FROM work_items') && text.includes('FOR UPDATE')) return { rows: [dbRow('wi-1')] };
+      if (text.includes('INSERT INTO factory_rule_ingress')) return { rows: [{ id: 'ingress-1' }] };
+      if (text.includes('INSERT INTO factory_rule_evaluations')) return { rows: [{ id: 'evaluation-1' }] };
+      return undefined;
+    });
+    const storage = new WorkItemsStoragePG();
+    await storage.init(ctx);
+
+    await expect(
+      storage.commitRuleEvaluation({
+        orgId: 'org1',
+        githubProjectId: 'p1',
+        workItemId: 'wi-1',
+        ingress: { identity: 'binding:thread:message:call', triggerType: 'tool.result' },
+        ruleSetVersion: 'rules-v1',
+        expectedRevision: 1,
+        outcome: { status: 'accepted' },
+        decisions: [{ type: 'notify', idempotencyKey: 'notify-1', title: 'Plan approved' }],
+        causalChain: [],
+        now: new Date('2026-07-18T10:00:00Z'),
+      }),
+    ).resolves.toMatchObject({ status: 'committed', result: { status: 'accepted', revision: 1 } });
+
+    const sql = queries.map(sqlOf);
+    expect(sql).toContain('BEGIN');
+    expect(sql.some(text => text.includes('SELECT pg_advisory_xact_lock'))).toBe(true);
+    expect(sql.some(text => text.includes('INSERT INTO factory_rule_ingress'))).toBe(true);
+    expect(sql.some(text => text.includes('INSERT INTO factory_rule_evaluations'))).toBe(true);
+    expect(sql.some(text => text.includes('INSERT INTO factory_deferred_decisions'))).toBe(true);
+    expect(sql.at(-1)).toBe('COMMIT');
+  });
+
+  it('stores and restores the durable tool-result cursor', async () => {
+    const cursorRow = {
+      binding_id: 'binding-1',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      last_message_id: 'message-1',
+      last_message_created_at: new Date('2026-07-18T10:00:00Z'),
+      updated_at: new Date('2026-07-18T10:00:01Z'),
+    };
+    const { queries, ctx } = fakePool(text =>
+      text.includes('SELECT * FROM factory_tool_result_cursors') ? { rows: [cursorRow] } : undefined,
+    );
+    const storage = new WorkItemsStoragePG();
+    await storage.init(ctx);
+
+    await expect(storage.getToolResultCursor('org1', 'p1', 'binding-1')).resolves.toMatchObject({
+      lastMessageId: 'message-1',
+    });
+    await storage.advanceToolResultCursor({
+      bindingId: 'binding-1',
+      orgId: 'org1',
+      githubProjectId: 'p1',
+      lastMessageId: 'message-2',
+      lastMessageCreatedAt: new Date('2026-07-18T10:01:00Z'),
+      updatedAt: new Date('2026-07-18T10:01:01Z'),
+    });
+    expect(queries.some(query => query.text.includes('INSERT INTO factory_tool_result_cursors'))).toBe(true);
+    expect(WORK_ITEMS_DDL).toContain('CREATE TABLE IF NOT EXISTS factory_tool_result_cursors');
   });
 
   it('serializes a parent update racing with deletion on the shared project lock', async () => {
