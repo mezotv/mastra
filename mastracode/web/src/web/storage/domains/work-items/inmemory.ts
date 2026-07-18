@@ -10,6 +10,7 @@ import {
   WorkItemsStorage,
   applyStageTransition,
   computeWorkItemPatch,
+  factoryDecisionHash,
   stampSessions,
   validateParentRelation,
 } from './base';
@@ -18,6 +19,9 @@ import type {
   CommitFactoryTransitionResult,
   CreateWorkItemInput,
   FactoryDeferredDecisionRecord,
+  FactoryDispatchFailureInput,
+  FactoryLeaseClaimInput,
+  FactoryLeaseIdentity,
   FactoryPendingStartRecord,
   FactoryRuleEvaluationRecord,
   FactoryRuleIngressRecord,
@@ -164,7 +168,7 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
         stage: input.destinationStage,
         decisions: structuredClone(input.evaluation.decisions),
       };
-      for (const decision of input.evaluation.decisions) {
+      for (const [effectOrdinal, decision] of input.evaluation.decisions.entries()) {
         const idempotencyKey = String(decision.idempotencyKey);
         this.#decisions.set(`${input.orgId}:${input.githubProjectId}:${idempotencyKey}`, {
           id: randomUUID(),
@@ -173,9 +177,19 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
           evaluationId,
           workItemId: item.id,
           idempotencyKey,
+          effectOrdinal,
+          effectHash: factoryDecisionHash(decision),
+          causalChain: structuredClone(input.causalChain),
           decision: structuredClone(decision),
           status: 'pending',
+          attempts: 0,
+          availableAt: now,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          lastError: null,
+          completedAt: null,
           createdAt: now,
+          updatedAt: now,
         });
       }
     }
@@ -211,6 +225,89 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       .map(decision => structuredClone(decision));
   }
 
+  async claimDeferredDecisions(input: FactoryLeaseClaimInput): Promise<FactoryDeferredDecisionRecord[]> {
+    const eligible = [...this.#decisions.values()]
+      .filter(
+        decision =>
+          decision.availableAt <= input.now &&
+          (decision.status === 'pending' ||
+            decision.status === 'retry' ||
+            (decision.status === 'leased' && decision.leaseExpiresAt !== null && decision.leaseExpiresAt <= input.now)),
+      )
+      .sort((left, right) => left.availableAt.getTime() - right.availableAt.getTime())
+      .slice(0, input.limit);
+    return eligible.map(decision => {
+      const claimed: FactoryDeferredDecisionRecord = {
+        ...decision,
+        status: 'leased',
+        attempts: decision.attempts + 1,
+        leaseOwner: input.ownerId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        updatedAt: input.now,
+      };
+      this.#decisions.set(`${decision.orgId}:${decision.githubProjectId}:${decision.idempotencyKey}`, claimed);
+      return structuredClone(claimed);
+    });
+  }
+
+  async renewDeferredDecisionLease(
+    identity: FactoryLeaseIdentity,
+    leaseExpiresAt: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null> {
+    const decision = [...this.#decisions.values()].find(entry => entry.id === identity.id);
+    if (!decision || !this.#ownsLease(decision, identity)) return null;
+    const renewed = { ...decision, leaseExpiresAt, updatedAt: new Date() };
+    this.#decisions.set(`${decision.orgId}:${decision.githubProjectId}:${decision.idempotencyKey}`, renewed);
+    return structuredClone(renewed);
+  }
+
+  async completeDeferredDecision(
+    identity: FactoryLeaseIdentity,
+    completedAt: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null> {
+    const decision = [...this.#decisions.values()].find(entry => entry.id === identity.id);
+    if (!decision || !this.#ownsLease(decision, identity)) return null;
+    const completed: FactoryDeferredDecisionRecord = {
+      ...decision,
+      status: 'succeeded',
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      completedAt,
+      updatedAt: completedAt,
+    };
+    this.#decisions.set(`${decision.orgId}:${decision.githubProjectId}:${decision.idempotencyKey}`, completed);
+    return structuredClone(completed);
+  }
+
+  async failDeferredDecision(input: FactoryDispatchFailureInput): Promise<FactoryDeferredDecisionRecord | null> {
+    const decision = [...this.#decisions.values()].find(entry => entry.id === input.id);
+    if (!decision || !this.#ownsLease(decision, input)) return null;
+    const failed: FactoryDeferredDecisionRecord = {
+      ...decision,
+      status: input.terminal ? 'failed' : 'retry',
+      availableAt: input.availableAt,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      lastError: input.lastError,
+      completedAt: input.terminal ? input.now : null,
+      updatedAt: input.now,
+    };
+    this.#decisions.set(`${decision.orgId}:${decision.githubProjectId}:${decision.idempotencyKey}`, failed);
+    return structuredClone(failed);
+  }
+
+  #ownsLease(
+    record: { orgId: string; githubProjectId: string; status: string; leaseOwner: string | null },
+    identity: FactoryLeaseIdentity,
+  ): boolean {
+    return (
+      record.orgId === identity.orgId &&
+      record.githubProjectId === identity.githubProjectId &&
+      record.status === 'leased' &&
+      record.leaseOwner === identity.ownerId
+    );
+  }
+
   async listRunBindings(
     orgId: string,
     githubProjectId: string,
@@ -230,6 +327,78 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     return [...this.#pendingStarts.values()]
       .filter(pending => pending.orgId === orgId && pending.githubProjectId === githubProjectId)
       .map(pending => structuredClone(pending));
+  }
+
+  async claimPendingStarts(input: FactoryLeaseClaimInput): Promise<FactoryPendingStartRecord[]> {
+    const eligible = [...this.#pendingStarts.values()]
+      .filter(
+        pending =>
+          pending.message !== null &&
+          pending.availableAt <= input.now &&
+          (pending.status === 'pending' ||
+            pending.status === 'retry' ||
+            (pending.status === 'leased' && pending.leaseExpiresAt !== null && pending.leaseExpiresAt <= input.now)),
+      )
+      .sort((left, right) => left.availableAt.getTime() - right.availableAt.getTime())
+      .slice(0, input.limit);
+    return eligible.map(pending => {
+      const claimed: FactoryPendingStartRecord = {
+        ...pending,
+        status: 'leased',
+        attempts: pending.attempts + 1,
+        leaseOwner: input.ownerId,
+        leaseExpiresAt: input.leaseExpiresAt,
+        updatedAt: input.now,
+      };
+      this.#pendingStarts.set(pending.id, claimed);
+      return structuredClone(claimed);
+    });
+  }
+
+  async renewPendingStartLease(
+    identity: FactoryLeaseIdentity,
+    leaseExpiresAt: Date,
+  ): Promise<FactoryPendingStartRecord | null> {
+    const pending = this.#pendingStarts.get(identity.id);
+    if (!pending || !this.#ownsLease(pending, identity)) return null;
+    const renewed = { ...pending, leaseExpiresAt, updatedAt: new Date() };
+    this.#pendingStarts.set(pending.id, renewed);
+    return structuredClone(renewed);
+  }
+
+  async completePendingStart(
+    identity: FactoryLeaseIdentity,
+    completedAt: Date,
+  ): Promise<FactoryPendingStartRecord | null> {
+    const pending = this.#pendingStarts.get(identity.id);
+    if (!pending || !this.#ownsLease(pending, identity)) return null;
+    const completed: FactoryPendingStartRecord = {
+      ...pending,
+      status: 'sent',
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      completedAt,
+      updatedAt: completedAt,
+    };
+    this.#pendingStarts.set(pending.id, completed);
+    return structuredClone(completed);
+  }
+
+  async failPendingStart(input: FactoryDispatchFailureInput): Promise<FactoryPendingStartRecord | null> {
+    const pending = this.#pendingStarts.get(input.id);
+    if (!pending || !this.#ownsLease(pending, input)) return null;
+    const failed: FactoryPendingStartRecord = {
+      ...pending,
+      status: input.terminal ? 'failed' : 'retry',
+      availableAt: input.availableAt,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      lastError: input.lastError,
+      completedAt: input.terminal ? input.now : null,
+      updatedAt: input.now,
+    };
+    this.#pendingStarts.set(pending.id, failed);
+    return structuredClone(failed);
   }
 
   async prepareRunStart(input: PrepareFactoryRunStartInput): Promise<PrepareFactoryRunStartResult> {
@@ -267,12 +436,7 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       });
       item = resolved.created
         ? resolved.item
-        : this.#applyPatch(
-            resolved.item,
-            { sessions: { [input.role]: input.session } },
-            input.userId,
-            new Date(),
-          ).item;
+        : this.#applyPatch(resolved.item, { sessions: { [input.role]: input.session } }, input.userId, new Date()).item;
     }
 
     const conflictingThread = [...this.#bindings.values()].find(
@@ -313,7 +477,12 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       kickoffKey: input.kickoffKey,
       message: input.kickoffMessage,
       status: 'pending',
+      attempts: 0,
+      availableAt: now,
+      leaseOwner: null,
+      leaseExpiresAt: null,
       lastError: null,
+      completedAt: null,
       createdAt: now,
       updatedAt: now,
     };

@@ -31,12 +31,13 @@ import type { WebAuthAdapter } from './auth-adapter.js';
 import { buildAuthRoutes, createWebAuthGate } from './auth.js';
 import type { FactoryIntegration, IntegrationTools } from './factory-integration.js';
 import { builtInFactoryRules } from './factory/rules/defaults.js';
+import { FactoryDecisionDispatcher } from './factory/rules/dispatcher.js';
 import type { FactoryRules } from './factory/rules/types.js';
 import { assertFactoryRules } from './factory/rules/validation.js';
 import { getFactoryWorkspace } from './factory/workspace.js';
 import { parseCreatedPullRequest, subscribeCurrentSessionToPullRequest } from './github/session-subscriptions.js';
 import type { WorkspaceSandbox } from '@mastra/core/workspace';
-import { getSeededGithubIntegration, seedRuntimeConfig } from './runtime-config.js';
+import { getFactoryStore, getSeededGithubIntegration, seedRuntimeConfig } from './runtime-config.js';
 import { FactoryStore } from './storage/factory-store.js';
 import { AuditStoragePG } from './storage/domains/audit/pg.js';
 import { ModelCredentialsStoragePG } from './storage/domains/credentials/pg.js';
@@ -176,6 +177,7 @@ function templateWorkingDirectory(sandbox: WorkspaceSandbox): string | undefined
 export class MastraFactory {
   readonly #config: MastraFactoryConfig;
   #prepared: Awaited<ReturnType<typeof prepareAgentControllerMount>> | undefined;
+  #dispatcher: FactoryDecisionDispatcher | undefined;
   #preparing = false;
 
   constructor(config: MastraFactoryConfig = {}) {
@@ -453,6 +455,13 @@ export class MastraFactory {
           integrations: readyIntegrations,
           intakeReady,
           factoryReady,
+          onFactoryRuntime: ({ transitionService }) => {
+            this.#dispatcher ??= new FactoryDecisionDispatcher({
+              controller,
+              transitionService,
+              storage: getFactoryStore().workItems,
+            });
+          },
         }),
       ],
       buildServerConfig: () => {
@@ -500,5 +509,11 @@ export class MastraFactory {
       throw new Error('MastraFactory.finalize() called before prepare()');
     }
     await this.#prepared.finalize();
+    this.#dispatcher?.start();
+  }
+
+  /** Stop Factory-owned background dispatch before the host process shuts down. */
+  async shutdown(): Promise<void> {
+    await this.#dispatcher?.stop();
   }
 }

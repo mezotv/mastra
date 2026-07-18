@@ -16,7 +16,24 @@
  * transition so it can never drift from `stages`.
  */
 
+import { createHash } from 'node:crypto';
+
 import type { FactoryStorageContext, FactoryStorageDomain } from '../../domain';
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+export function factoryDecisionHash(decision: Record<string, unknown>): string {
+  return createHash('sha256').update(stableJson(decision)).digest('hex');
+}
 
 /** Where a work item was materialized from. */
 export type WorkItemSource = 'github-issue' | 'github-pr' | 'linear-issue' | 'manual';
@@ -98,6 +115,8 @@ export interface FactoryRuleEvaluationRecord {
   createdAt: Date;
 }
 
+export type FactoryDispatchStatus = 'pending' | 'leased' | 'retry' | 'succeeded' | 'failed';
+
 export interface FactoryDeferredDecisionRecord {
   id: string;
   orgId: string;
@@ -105,9 +124,19 @@ export interface FactoryDeferredDecisionRecord {
   evaluationId: string;
   workItemId: string;
   idempotencyKey: string;
+  effectOrdinal: number;
+  effectHash: string;
+  causalChain: Array<{ ingressId: string; decisionType: string }>;
   decision: Record<string, unknown>;
-  status: 'pending';
+  status: FactoryDispatchStatus;
+  attempts: number;
+  availableAt: Date;
+  leaseOwner: string | null;
+  leaseExpiresAt: Date | null;
+  lastError: string | null;
+  completedAt: Date | null;
   createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface FactoryRunBindingRecord {
@@ -132,10 +161,36 @@ export interface FactoryPendingStartRecord {
   bindingId: string;
   kickoffKey: string;
   message: string | null;
-  status: 'pending' | 'sent' | 'failed';
+  status: 'pending' | 'leased' | 'retry' | 'sent' | 'failed';
+  attempts: number;
+  availableAt: Date;
+  leaseOwner: string | null;
+  leaseExpiresAt: Date | null;
   lastError: string | null;
+  completedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface FactoryLeaseClaimInput {
+  ownerId: string;
+  now: Date;
+  leaseExpiresAt: Date;
+  limit: number;
+}
+
+export interface FactoryLeaseIdentity {
+  id: string;
+  orgId: string;
+  githubProjectId: string;
+  ownerId: string;
+}
+
+export interface FactoryDispatchFailureInput extends FactoryLeaseIdentity {
+  now: Date;
+  availableAt: Date;
+  lastError: string;
+  terminal: boolean;
 }
 
 export interface CommitFactoryTransitionInput {
@@ -147,6 +202,7 @@ export interface CommitFactoryTransitionInput {
   actorId: string;
   ingress: { identity: string; triggerType: string; transitionId: string };
   ruleSetVersion: string;
+  causalChain: Array<{ ingressId: string; decisionType: string }>;
   evaluation:
     | { outcome: 'accepted'; decisions: Record<string, unknown>[] }
     | { outcome: 'rejected'; code: string; reason: string };
@@ -343,8 +399,23 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   /** Atomically dedupe ingress, compare-and-set the item, and persist evaluation/outbox state. */
   abstract commitTransition(input: CommitFactoryTransitionInput): Promise<CommitFactoryTransitionResult>;
 
-  /** List durable deferred decisions for dispatch and recovery. */
+  /** List durable deferred decisions for audit and recovery. */
   abstract listDeferredDecisions(orgId: string, githubProjectId: string): Promise<FactoryDeferredDecisionRecord[]>;
+
+  /** Atomically claim currently available decisions. Expired leases are eligible for recovery. */
+  abstract claimDeferredDecisions(input: FactoryLeaseClaimInput): Promise<FactoryDeferredDecisionRecord[]>;
+
+  abstract renewDeferredDecisionLease(
+    identity: FactoryLeaseIdentity,
+    leaseExpiresAt: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null>;
+
+  abstract completeDeferredDecision(
+    identity: FactoryLeaseIdentity,
+    completedAt: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null>;
+
+  abstract failDeferredDecision(input: FactoryDispatchFailureInput): Promise<FactoryDeferredDecisionRecord | null>;
 
   /** List binding history, optionally narrowed to one work item. */
   abstract listRunBindings(
@@ -355,6 +426,21 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
 
   /** List recoverable kickoff records for this tenant and project. */
   abstract listPendingStarts(orgId: string, githubProjectId: string): Promise<FactoryPendingStartRecord[]>;
+
+  /** Atomically claim currently available kickoff records. Expired leases are eligible for recovery. */
+  abstract claimPendingStarts(input: FactoryLeaseClaimInput): Promise<FactoryPendingStartRecord[]>;
+
+  abstract renewPendingStartLease(
+    identity: FactoryLeaseIdentity,
+    leaseExpiresAt: Date,
+  ): Promise<FactoryPendingStartRecord | null>;
+
+  abstract completePendingStart(
+    identity: FactoryLeaseIdentity,
+    completedAt: Date,
+  ): Promise<FactoryPendingStartRecord | null>;
+
+  abstract failPendingStart(input: FactoryDispatchFailureInput): Promise<FactoryPendingStartRecord | null>;
 
   /** Atomically attach a session, activate its exact binding, and create recoverable kickoff state. */
   abstract prepareRunStart(input: PrepareFactoryRunStartInput): Promise<PrepareFactoryRunStartResult>;

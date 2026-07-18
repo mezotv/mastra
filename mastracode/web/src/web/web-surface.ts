@@ -74,6 +74,7 @@ export interface WebApiRoutesDeps {
    * synchronous.
    */
   factoryReady: boolean;
+  onFactoryRuntime?: (runtime: { transitionService: FactoryTransitionService }) => void;
 }
 
 /**
@@ -440,6 +441,7 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
     if (!deps.factoryReady) return [];
     const workItems = getFactoryStore().workItems;
     const transitionService = new FactoryTransitionService({ rules: getSeededFactoryRules(), storage: workItems });
+    deps.onFactoryRuntime?.({ transitionService });
     return buildFactoryRoutes(githubStorage, {
       transitionService,
       startCoordinator: new FactoryStartCoordinator(deps.controller, workItems, transitionService),

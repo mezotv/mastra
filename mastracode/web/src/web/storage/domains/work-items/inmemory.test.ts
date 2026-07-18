@@ -46,6 +46,7 @@ describe('WorkItemsStorageInMemory', () => {
       actorId: 'user1',
       ingress: { identity, triggerType: 'human', transitionId: `transition-${identity}` },
       ruleSetVersion: 'rules-v1',
+      causalChain: [],
       evaluation: {
         outcome: 'accepted',
         decisions: [{ type: 'notify', idempotencyKey: `notify-${identity}`, title: 'Moved' }],
@@ -83,6 +84,7 @@ describe('WorkItemsStorageInMemory', () => {
       actorId: 'user1',
       ingress: { identity: 'same-event', triggerType: 'human', transitionId: 'transition-1' },
       ruleSetVersion: 'rules-v1',
+      causalChain: [],
       evaluation: { outcome: 'accepted', decisions: [] },
     };
     const first = await storage.commitTransition(base);

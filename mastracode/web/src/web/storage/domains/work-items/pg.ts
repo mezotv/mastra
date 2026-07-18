@@ -15,6 +15,7 @@ import {
   WorkItemsStorage,
   applyStageTransition,
   computeWorkItemPatch,
+  factoryDecisionHash,
   stampSessions,
   validateParentRelation,
 } from './base';
@@ -23,6 +24,9 @@ import type {
   CommitFactoryTransitionResult,
   CreateWorkItemInput,
   FactoryDeferredDecisionRecord,
+  FactoryDispatchFailureInput,
+  FactoryLeaseClaimInput,
+  FactoryLeaseIdentity,
   FactoryPendingStartRecord,
   FactoryRunBindingRecord,
   PrepareFactoryRunStartInput,
@@ -88,13 +92,33 @@ CREATE TABLE IF NOT EXISTS factory_deferred_decisions (
   evaluation_id uuid NOT NULL REFERENCES factory_rule_evaluations(id) ON DELETE CASCADE,
   work_item_id uuid NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
   idempotency_key text NOT NULL,
+  effect_ordinal integer NOT NULL,
+  effect_hash text NOT NULL,
+  causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb,
   decision jsonb NOT NULL,
   status text NOT NULL DEFAULT 'pending',
-  created_at timestamptz NOT NULL DEFAULT now()
+  attempts integer NOT NULL DEFAULT 0,
+  available_at timestamptz NOT NULL DEFAULT now(),
+  lease_owner text,
+  lease_expires_at timestamptz,
+  last_error text,
+  completed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE factory_deferred_decisions
   ADD COLUMN IF NOT EXISTS org_id text,
-  ADD COLUMN IF NOT EXISTS github_project_id uuid;
+  ADD COLUMN IF NOT EXISTS github_project_id uuid,
+  ADD COLUMN IF NOT EXISTS effect_ordinal integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS effect_hash text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS lease_owner text,
+  ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_error text,
+  ADD COLUMN IF NOT EXISTS completed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 UPDATE factory_deferred_decisions AS decision
 SET org_id = ingress.org_id,
     github_project_id = ingress.github_project_id
@@ -109,6 +133,10 @@ ALTER TABLE factory_deferred_decisions
   DROP CONSTRAINT IF EXISTS factory_deferred_decisions_idempotency_key_key;
 CREATE UNIQUE INDEX IF NOT EXISTS factory_deferred_decisions_tenant_key_unique
   ON factory_deferred_decisions (org_id, github_project_id, idempotency_key);
+CREATE UNIQUE INDEX IF NOT EXISTS factory_deferred_decisions_effect_unique
+  ON factory_deferred_decisions (evaluation_id, effect_ordinal, effect_hash);
+CREATE INDEX IF NOT EXISTS factory_deferred_decisions_claim_idx
+  ON factory_deferred_decisions (status, available_at, lease_expires_at);
 
 CREATE TABLE IF NOT EXISTS factory_run_bindings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -139,13 +167,23 @@ CREATE TABLE IF NOT EXISTS factory_pending_starts (
   kickoff_key text NOT NULL,
   message text,
   status text NOT NULL DEFAULT 'pending',
+  attempts integer NOT NULL DEFAULT 0,
+  available_at timestamptz NOT NULL DEFAULT now(),
+  lease_owner text,
+  lease_expires_at timestamptz,
   last_error text,
+  completed_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE factory_pending_starts
   ADD COLUMN IF NOT EXISTS org_id text,
-  ADD COLUMN IF NOT EXISTS github_project_id uuid;
+  ADD COLUMN IF NOT EXISTS github_project_id uuid,
+  ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS lease_owner text,
+  ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
+  ADD COLUMN IF NOT EXISTS completed_at timestamptz;
 UPDATE factory_pending_starts AS pending
 SET org_id = binding.org_id,
     github_project_id = binding.github_project_id
@@ -159,6 +197,8 @@ ALTER TABLE factory_pending_starts
   DROP CONSTRAINT IF EXISTS factory_pending_starts_kickoff_key_key;
 CREATE UNIQUE INDEX IF NOT EXISTS factory_pending_starts_tenant_kickoff_unique
   ON factory_pending_starts (org_id, github_project_id, kickoff_key);
+CREATE INDEX IF NOT EXISTS factory_pending_starts_claim_idx
+  ON factory_pending_starts (status, available_at, lease_expires_at);
 
 DO $$
 BEGIN
@@ -214,9 +254,19 @@ interface DeferredDecisionDbRow {
   evaluation_id: string;
   work_item_id: string;
   idempotency_key: string;
+  effect_ordinal: number;
+  effect_hash: string;
+  causal_chain: Array<{ ingressId: string; decisionType: string }>;
   decision: Record<string, unknown>;
-  status: 'pending';
+  status: FactoryDeferredDecisionRecord['status'];
+  attempts: number;
+  available_at: Date;
+  lease_owner: string | null;
+  lease_expires_at: Date | null;
+  last_error: string | null;
+  completed_at: Date | null;
   created_at: Date;
+  updated_at: Date;
 }
 
 interface PendingStartDbRow {
@@ -226,8 +276,13 @@ interface PendingStartDbRow {
   binding_id: string;
   kickoff_key: string;
   message: string | null;
-  status: 'pending' | 'sent' | 'failed';
+  status: FactoryPendingStartRecord['status'];
+  attempts: number;
+  available_at: Date;
+  lease_owner: string | null;
+  lease_expires_at: Date | null;
   last_error: string | null;
+  completed_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -257,9 +312,19 @@ function toDeferredDecision(row: DeferredDecisionDbRow): FactoryDeferredDecision
     evaluationId: row.evaluation_id,
     workItemId: row.work_item_id,
     idempotencyKey: row.idempotency_key,
+    effectOrdinal: row.effect_ordinal,
+    effectHash: row.effect_hash,
+    causalChain: row.causal_chain,
     decision: row.decision,
     status: row.status,
+    attempts: row.attempts,
+    availableAt: row.available_at,
+    leaseOwner: row.lease_owner,
+    leaseExpiresAt: row.lease_expires_at,
+    lastError: row.last_error,
+    completedAt: row.completed_at,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -272,7 +337,12 @@ function toPendingStart(row: PendingStartDbRow): FactoryPendingStartRecord {
     kickoffKey: row.kickoff_key,
     message: row.message,
     status: row.status,
+    attempts: row.attempts,
+    availableAt: row.available_at,
+    leaseOwner: row.lease_owner,
+    leaseExpiresAt: row.lease_expires_at,
     lastError: row.last_error,
+    completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -534,18 +604,24 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
         [ingress.rows[0]!.id, existing.id, input.ruleSetVersion, input.expectedRevision, outcome, code, reason, now],
       );
       if (outcome === 'accepted' && input.evaluation.outcome === 'accepted') {
-        for (const decision of input.evaluation.decisions) {
+        for (const [effectOrdinal, decision] of input.evaluation.decisions.entries()) {
           await client.query(
             `INSERT INTO factory_deferred_decisions
-               (org_id, github_project_id, evaluation_id, work_item_id, idempotency_key, decision, status, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', $7)`,
+               (org_id, github_project_id, evaluation_id, work_item_id, idempotency_key,
+                effect_ordinal, effect_hash, causal_chain, decision, status, available_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, 'pending', $10, $11, $12)`,
             [
               input.orgId,
               input.githubProjectId,
               evaluation.rows[0]!.id,
               existing.id,
               String(decision.idempotencyKey),
+              effectOrdinal,
+              factoryDecisionHash(decision),
+              JSON.stringify(input.causalChain),
               JSON.stringify(decision),
+              now,
+              now,
               now,
             ],
           );
@@ -563,6 +639,81 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       [orgId, githubProjectId],
     );
     return rows.map(toDeferredDecision);
+  }
+
+  async claimDeferredDecisions(input: FactoryLeaseClaimInput): Promise<FactoryDeferredDecisionRecord[]> {
+    const { rows } = await this.#db.query<DeferredDecisionDbRow>(
+      `WITH candidates AS (
+         SELECT id FROM factory_deferred_decisions
+         WHERE available_at <= $1
+           AND (status IN ('pending', 'retry') OR (status = 'leased' AND lease_expires_at <= $1))
+         ORDER BY available_at ASC, created_at ASC
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE factory_deferred_decisions AS decision
+       SET status = 'leased', attempts = attempts + 1, lease_owner = $3,
+           lease_expires_at = $4, updated_at = $1
+       FROM candidates
+       WHERE decision.id = candidates.id
+       RETURNING decision.*`,
+      [input.now, input.limit, input.ownerId, input.leaseExpiresAt],
+    );
+    return rows.map(toDeferredDecision);
+  }
+
+  async renewDeferredDecisionLease(
+    identity: FactoryLeaseIdentity,
+    leaseExpiresAt: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null> {
+    const { rows } = await this.#db.query<DeferredDecisionDbRow>(
+      `UPDATE factory_deferred_decisions
+       SET lease_expires_at = $1, updated_at = now()
+       WHERE id = $2 AND org_id = $3 AND github_project_id = $4
+         AND status = 'leased' AND lease_owner = $5
+       RETURNING *`,
+      [leaseExpiresAt, identity.id, identity.orgId, identity.githubProjectId, identity.ownerId],
+    );
+    return rows[0] ? toDeferredDecision(rows[0]) : null;
+  }
+
+  async completeDeferredDecision(
+    identity: FactoryLeaseIdentity,
+    completedAt: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null> {
+    const { rows } = await this.#db.query<DeferredDecisionDbRow>(
+      `UPDATE factory_deferred_decisions
+       SET status = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
+           completed_at = $1, updated_at = $1
+       WHERE id = $2 AND org_id = $3 AND github_project_id = $4
+         AND status = 'leased' AND lease_owner = $5
+       RETURNING *`,
+      [completedAt, identity.id, identity.orgId, identity.githubProjectId, identity.ownerId],
+    );
+    return rows[0] ? toDeferredDecision(rows[0]) : null;
+  }
+
+  async failDeferredDecision(input: FactoryDispatchFailureInput): Promise<FactoryDeferredDecisionRecord | null> {
+    const { rows } = await this.#db.query<DeferredDecisionDbRow>(
+      `UPDATE factory_deferred_decisions
+       SET status = $1, available_at = $2, lease_owner = NULL, lease_expires_at = NULL,
+           last_error = $3, completed_at = $4, updated_at = $5
+       WHERE id = $6 AND org_id = $7 AND github_project_id = $8
+         AND status = 'leased' AND lease_owner = $9
+       RETURNING *`,
+      [
+        input.terminal ? 'failed' : 'retry',
+        input.availableAt,
+        input.lastError,
+        input.terminal ? input.now : null,
+        input.now,
+        input.id,
+        input.orgId,
+        input.githubProjectId,
+        input.ownerId,
+      ],
+    );
+    return rows[0] ? toDeferredDecision(rows[0]) : null;
   }
 
   async listRunBindings(
@@ -589,6 +740,81 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       [orgId, githubProjectId],
     );
     return rows.map(toPendingStart);
+  }
+
+  async claimPendingStarts(input: FactoryLeaseClaimInput): Promise<FactoryPendingStartRecord[]> {
+    const { rows } = await this.#db.query<PendingStartDbRow>(
+      `WITH candidates AS (
+         SELECT id FROM factory_pending_starts
+         WHERE message IS NOT NULL AND available_at <= $1
+           AND (status IN ('pending', 'retry') OR (status = 'leased' AND lease_expires_at <= $1))
+         ORDER BY available_at ASC, created_at ASC
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE factory_pending_starts AS pending
+       SET status = 'leased', attempts = attempts + 1, lease_owner = $3,
+           lease_expires_at = $4, updated_at = $1
+       FROM candidates
+       WHERE pending.id = candidates.id
+       RETURNING pending.*`,
+      [input.now, input.limit, input.ownerId, input.leaseExpiresAt],
+    );
+    return rows.map(toPendingStart);
+  }
+
+  async renewPendingStartLease(
+    identity: FactoryLeaseIdentity,
+    leaseExpiresAt: Date,
+  ): Promise<FactoryPendingStartRecord | null> {
+    const { rows } = await this.#db.query<PendingStartDbRow>(
+      `UPDATE factory_pending_starts
+       SET lease_expires_at = $1, updated_at = now()
+       WHERE id = $2 AND org_id = $3 AND github_project_id = $4
+         AND status = 'leased' AND lease_owner = $5
+       RETURNING *`,
+      [leaseExpiresAt, identity.id, identity.orgId, identity.githubProjectId, identity.ownerId],
+    );
+    return rows[0] ? toPendingStart(rows[0]) : null;
+  }
+
+  async completePendingStart(
+    identity: FactoryLeaseIdentity,
+    completedAt: Date,
+  ): Promise<FactoryPendingStartRecord | null> {
+    const { rows } = await this.#db.query<PendingStartDbRow>(
+      `UPDATE factory_pending_starts
+       SET status = 'sent', lease_owner = NULL, lease_expires_at = NULL,
+           completed_at = $1, updated_at = $1
+       WHERE id = $2 AND org_id = $3 AND github_project_id = $4
+         AND status = 'leased' AND lease_owner = $5
+       RETURNING *`,
+      [completedAt, identity.id, identity.orgId, identity.githubProjectId, identity.ownerId],
+    );
+    return rows[0] ? toPendingStart(rows[0]) : null;
+  }
+
+  async failPendingStart(input: FactoryDispatchFailureInput): Promise<FactoryPendingStartRecord | null> {
+    const { rows } = await this.#db.query<PendingStartDbRow>(
+      `UPDATE factory_pending_starts
+       SET status = $1, available_at = $2, lease_owner = NULL, lease_expires_at = NULL,
+           last_error = $3, completed_at = $4, updated_at = $5
+       WHERE id = $6 AND org_id = $7 AND github_project_id = $8
+         AND status = 'leased' AND lease_owner = $9
+       RETURNING *`,
+      [
+        input.terminal ? 'failed' : 'retry',
+        input.availableAt,
+        input.lastError,
+        input.terminal ? input.now : null,
+        input.now,
+        input.id,
+        input.orgId,
+        input.githubProjectId,
+        input.ownerId,
+      ],
+    );
+    return rows[0] ? toPendingStart(rows[0]) : null;
   }
 
   async prepareRunStart(input: PrepareFactoryRunStartInput): Promise<PrepareFactoryRunStartResult> {

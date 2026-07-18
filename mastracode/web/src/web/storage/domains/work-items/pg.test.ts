@@ -166,9 +166,61 @@ describe('WorkItemsStoragePG', () => {
   it('declares tenant-scoped ingress, deferred decisions, bindings, and pending starts', () => {
     expect(WORK_ITEMS_DDL).toContain('UNIQUE (org_id, github_project_id, identity)');
     expect(WORK_ITEMS_DDL).toContain('factory_deferred_decisions_tenant_key_unique');
+    expect(WORK_ITEMS_DDL).toContain('factory_deferred_decisions_effect_unique');
+    expect(WORK_ITEMS_DDL).toContain('effect_ordinal integer NOT NULL');
+    expect(WORK_ITEMS_DDL).toContain('effect_hash text NOT NULL');
+    expect(WORK_ITEMS_DDL).toContain('lease_expires_at timestamptz');
     expect(WORK_ITEMS_DDL).toContain('factory_run_bindings_active_role_unique');
     expect(WORK_ITEMS_DDL).toContain('factory_run_bindings_active_thread_unique');
     expect(WORK_ITEMS_DDL).toContain('factory_pending_starts_tenant_kickoff_unique');
+  });
+
+  it('claims available and expired deferred decisions with a fenced SKIP LOCKED lease', async () => {
+    const now = new Date('2026-07-02T00:00:00Z');
+    const leaseExpiresAt = new Date(now.getTime() + 30_000);
+    const decisionRow = {
+      id: 'decision-1',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      evaluation_id: 'evaluation-1',
+      work_item_id: 'wi-1',
+      idempotency_key: 'notify-1',
+      effect_ordinal: 0,
+      effect_hash: 'hash-1',
+      causal_chain: [],
+      decision: { type: 'notify', idempotencyKey: 'notify-1', title: 'Moved' },
+      status: 'leased',
+      attempts: 1,
+      available_at: now,
+      lease_owner: 'worker-1',
+      lease_expires_at: leaseExpiresAt,
+      last_error: null,
+      completed_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const { queries, ctx } = fakePool(text => {
+      if (text.includes('WITH candidates AS') && text.includes('factory_deferred_decisions')) {
+        return { rows: [decisionRow] };
+      }
+      return undefined;
+    });
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    const claimed = await domain.claimDeferredDecisions({ ownerId: 'worker-1', now, leaseExpiresAt, limit: 10 });
+
+    expect(claimed[0]).toMatchObject({
+      id: 'decision-1',
+      effectOrdinal: 0,
+      effectHash: 'hash-1',
+      leaseOwner: 'worker-1',
+    });
+    const claim = queries.find(query => query.text.includes('WITH candidates AS'))!;
+    expect(sqlOf(claim)).toContain('FOR UPDATE SKIP LOCKED');
+    expect(sqlOf(claim)).toContain("status IN ('pending', 'retry')");
+    expect(sqlOf(claim)).toContain("status = 'leased' AND lease_expires_at <= $1");
+    expect(claim.values).toEqual([now, 10, 'worker-1', leaseExpiresAt]);
   });
 
   it('commits CAS movement, ingress, evaluation, and deferred decisions in one transaction', async () => {
@@ -201,6 +253,7 @@ describe('WorkItemsStoragePG', () => {
       actorId: 'u1',
       ingress: { identity: 'request-1', triggerType: 'human', transitionId: '00000000-0000-4000-8000-000000000099' },
       ruleSetVersion: 'rules-v1',
+      causalChain: [],
       evaluation: {
         outcome: 'accepted',
         decisions: [{ type: 'notify', idempotencyKey: 'notify-1', title: 'Moved' }],
@@ -217,6 +270,9 @@ describe('WorkItemsStoragePG', () => {
     expect(sql.some(text => text.includes('INSERT INTO factory_rule_evaluations'))).toBe(true);
     const deferred = queries.find(query => query.text.includes('INSERT INTO factory_deferred_decisions'));
     expect(deferred?.values?.slice(0, 2)).toEqual(['org1', 'p1']);
+    expect(deferred?.values?.[5]).toBe(0);
+    expect(deferred?.values?.[6]).toMatch(/^[a-f0-9]{64}$/);
+    expect(deferred?.values?.[7]).toBe('[]');
   });
 
   it('rolls back the authoritative transition when deferred decision persistence fails', async () => {
@@ -243,6 +299,7 @@ describe('WorkItemsStoragePG', () => {
         actorId: 'u1',
         ingress: { identity: 'request-rollback', triggerType: 'human', transitionId: 'transition-rollback' },
         ruleSetVersion: 'rules-v1',
+        causalChain: [],
         evaluation: {
           outcome: 'accepted',
           decisions: [{ type: 'notify', idempotencyKey: 'notify-rollback', title: 'Moved' }],
