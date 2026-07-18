@@ -450,6 +450,7 @@ export class GithubIntegration implements FactoryIntegration {
       baseUrl: ctx.baseUrl,
       controller: ctx.controller,
       runIssueTriage: ctx.hooks?.runIssueTriage,
+      ingestFactoryEvent: ctx.hooks?.ingestGithubEvent,
     });
   }
 

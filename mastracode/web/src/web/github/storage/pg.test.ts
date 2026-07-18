@@ -28,6 +28,9 @@ describe('GithubStoragePG', () => {
     expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_project_sandboxes');
     expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_worktrees');
     expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_signal_subscriptions');
+    expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_pull_request_provenance');
+    expect(GITHUB_DDL).toContain('UNIQUE (github_project_id, repository_id, pull_request_number)');
+    expect(GITHUB_DDL).toContain('UNIQUE (binding_id, thread_id, assistant_message_id, tool_call_id)');
     expect(GITHUB_DDL).toContain('CREATE UNIQUE INDEX IF NOT EXISTS github_installations_org_installation_unique');
     expect(GITHUB_DDL).toContain('CREATE UNIQUE INDEX IF NOT EXISTS github_signal_subscriptions_target_pr_unique');
   });
@@ -81,6 +84,75 @@ describe('GithubStoragePG', () => {
     const updated = await storage.upsertProject({ ...input, sandboxProvider: 'railway' });
 
     expect(updated.sandboxProvider).toBe('railway');
+  });
+
+  it('persists verified pull request provenance and lists every tenant project mapped to a repository', async () => {
+    const projectRows = [
+      {
+        id: 'project-1',
+        org_id: 'org1',
+        user_id: 'user1',
+        installation_id: '12',
+        repo_full_name: 'mastra-ai/mastra',
+        repo_id: '34',
+        default_branch: 'main',
+        sandbox_provider: 'local',
+        sandbox_workdir: '/workspace',
+        setup_command: null,
+        created_at: new Date(),
+      },
+      {
+        id: 'project-2',
+        org_id: 'org2',
+        user_id: 'user2',
+        installation_id: '12',
+        repo_full_name: 'mastra-ai/mastra',
+        repo_id: '34',
+        default_branch: 'main',
+        sandbox_provider: 'local',
+        sandbox_workdir: '/workspace',
+        setup_command: null,
+        created_at: new Date(),
+      },
+    ];
+    const provenance = {
+      id: 'provenance-1',
+      org_id: 'org1',
+      github_project_id: 'project-1',
+      binding_id: 'binding-1',
+      work_item_id: 'item-1',
+      repository_id: '34',
+      pull_request_number: '17',
+      pull_request_url: 'https://github.com/mastra-ai/mastra/pull/17',
+      thread_id: 'thread-1',
+      assistant_message_id: 'message-1',
+      tool_call_id: 'call-1',
+      created_at: new Date(),
+    };
+    const { queries, ctx } = fakeContext(text => {
+      if (text.includes('ORDER BY org_id, id')) return projectRows;
+      if (text.includes('github_pull_request_provenance')) return [provenance];
+      return [];
+    });
+    const storage = new GithubStoragePG();
+    await storage.init(ctx);
+
+    await expect(storage.findProjectsByRepo(12, 'mastra-ai/mastra')).resolves.toHaveLength(2);
+    await expect(
+      storage.recordPullRequestProvenance({
+        orgId: 'org1',
+        githubProjectId: 'project-1',
+        bindingId: 'binding-1',
+        workItemId: 'item-1',
+        repositoryId: 34,
+        pullRequestNumber: 17,
+        pullRequestUrl: provenance.pull_request_url,
+        threadId: 'thread-1',
+        assistantMessageId: 'message-1',
+        toolCallId: 'call-1',
+      }),
+    ).resolves.toMatchObject({ repositoryId: 34, pullRequestNumber: 17, workItemId: 'item-1' });
+    expect(queries.at(-1)?.text).toContain('ON CONFLICT (github_project_id, repository_id, pull_request_number)');
   });
 
   it('refuses queries before init succeeds', async () => {

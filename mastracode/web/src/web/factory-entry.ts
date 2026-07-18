@@ -38,6 +38,7 @@ import { FactoryTransitionService } from './factory/rules/transition-service.js'
 import type { FactoryRules } from './factory/rules/types.js';
 import { assertFactoryRules } from './factory/rules/validation.js';
 import { getFactoryWorkspace } from './factory/workspace.js';
+import { recordFactoryPullRequestProvenance } from './github/provenance.js';
 import { parseCreatedPullRequest, subscribeCurrentSessionToPullRequest } from './github/session-subscriptions.js';
 import type { WorkspaceSandbox } from '@mastra/core/workspace';
 import { getFactoryStore, getSeededGithubIntegration, seedRuntimeConfig } from './runtime-config.js';
@@ -329,6 +330,7 @@ export class MastraFactory {
 
     // Factory work-item board — hangs off GitHub projects, same fail-soft pattern.
     const factoryReady = await resolveFactoryReady(githubReady);
+    const githubIntegration = getSeededGithubIntegration();
     const workItemsStorage = factoryStore?.isReady('work-items') ? factoryStore.workItems : undefined;
     const transitionService = workItemsStorage
       ? new FactoryTransitionService({ rules, storage: workItemsStorage })
@@ -338,6 +340,12 @@ export class MastraFactory {
           rules,
           storage: workItemsStorage,
           ...(transitionService ? { transitionService } : {}),
+          ...(githubIntegration
+            ? {
+                recordPullRequestProvenance: (input: Parameters<typeof recordFactoryPullRequestProvenance>[1]) =>
+                  recordFactoryPullRequestProvenance(githubIntegration, input),
+              }
+            : {}),
           ...(storage
             ? {
                 messageReader: {

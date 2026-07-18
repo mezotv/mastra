@@ -16,6 +16,7 @@ import type {
   GithubInstallationRow,
   GithubProjectRow,
   GithubProjectSandboxRow,
+  GithubPullRequestProvenanceRow,
   GithubSignalSubscriptionRow,
   GithubSignalSubscriptionStatus,
   GithubWebhookPullRequestTarget,
@@ -23,6 +24,7 @@ import type {
   NewGithubInstallation,
   NewGithubSignalSubscription,
   PullRequestSubscriptionTarget,
+  RecordGithubPullRequestProvenanceInput,
   SubscribeToPullRequestInput,
   ThreadSubscriptionTarget,
   UpsertGithubProjectInput,
@@ -94,6 +96,26 @@ ALTER TABLE github_worktrees ADD COLUMN IF NOT EXISTS org_id text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS github_worktrees_project_user_branch_unique
   ON github_worktrees (github_project_id, user_id, branch);
+
+CREATE TABLE IF NOT EXISTS github_pull_request_provenance (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id text NOT NULL,
+  github_project_id uuid NOT NULL,
+  binding_id uuid NOT NULL,
+  work_item_id uuid NOT NULL,
+  repository_id bigint NOT NULL,
+  pull_request_number bigint NOT NULL,
+  pull_request_url text NOT NULL,
+  thread_id text NOT NULL,
+  assistant_message_id text NOT NULL,
+  tool_call_id text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (github_project_id, repository_id, pull_request_number),
+  UNIQUE (binding_id, thread_id, assistant_message_id, tool_call_id)
+);
+
+CREATE INDEX IF NOT EXISTS github_pull_request_provenance_project_lookup
+  ON github_pull_request_provenance (org_id, github_project_id, repository_id, pull_request_number);
 
 CREATE TABLE IF NOT EXISTS github_signal_subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -181,6 +203,38 @@ function toProject(db: ProjectDbRow): GithubProjectRow {
     sandboxProvider: db.sandbox_provider,
     sandboxWorkdir: db.sandbox_workdir,
     setupCommand: db.setup_command,
+    createdAt: db.created_at,
+  };
+}
+
+interface PullRequestProvenanceDbRow {
+  id: string;
+  org_id: string;
+  github_project_id: string;
+  binding_id: string;
+  work_item_id: string;
+  repository_id: string | number;
+  pull_request_number: string | number;
+  pull_request_url: string;
+  thread_id: string;
+  assistant_message_id: string;
+  tool_call_id: string;
+  created_at: Date;
+}
+
+function toPullRequestProvenance(db: PullRequestProvenanceDbRow): GithubPullRequestProvenanceRow {
+  return {
+    id: db.id,
+    orgId: db.org_id,
+    githubProjectId: db.github_project_id,
+    bindingId: db.binding_id,
+    workItemId: db.work_item_id,
+    repositoryId: Number(db.repository_id),
+    pullRequestNumber: Number(db.pull_request_number),
+    pullRequestUrl: db.pull_request_url,
+    threadId: db.thread_id,
+    assistantMessageId: db.assistant_message_id,
+    toolCallId: db.tool_call_id,
     createdAt: db.created_at,
   };
 }
@@ -342,6 +396,14 @@ export class GithubStoragePG extends GithubStorage {
     return rows[0] ? toProject(rows[0]) : null;
   }
 
+  async findProjectsByRepo(installationId: number, repoFullName: string): Promise<GithubProjectRow[]> {
+    const { rows } = await this.#db.query<ProjectDbRow>(
+      'SELECT * FROM github_projects WHERE installation_id = $1 AND repo_full_name = $2 ORDER BY org_id, id',
+      [installationId, repoFullName],
+    );
+    return rows.map(toProject);
+  }
+
   async upsertProject(input: UpsertGithubProjectInput): Promise<GithubProjectRow> {
     const { rows } = await this.#db.query<ProjectDbRow>(
       `INSERT INTO github_projects
@@ -371,6 +433,46 @@ export class GithubStoragePG extends GithubStorage {
 
   async setProjectSetupCommand(projectId: string, setupCommand: string | null): Promise<void> {
     await this.#db.query('UPDATE github_projects SET setup_command = $2 WHERE id = $1', [projectId, setupCommand]);
+  }
+
+  async recordPullRequestProvenance(
+    input: RecordGithubPullRequestProvenanceInput,
+  ): Promise<GithubPullRequestProvenanceRow> {
+    const { rows } = await this.#db.query<PullRequestProvenanceDbRow>(
+      `INSERT INTO github_pull_request_provenance
+         (org_id, github_project_id, binding_id, work_item_id, repository_id, pull_request_number,
+          pull_request_url, thread_id, assistant_message_id, tool_call_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (github_project_id, repository_id, pull_request_number) DO UPDATE
+       SET pull_request_url = EXCLUDED.pull_request_url
+       RETURNING *`,
+      [
+        input.orgId,
+        input.githubProjectId,
+        input.bindingId,
+        input.workItemId,
+        input.repositoryId,
+        input.pullRequestNumber,
+        input.pullRequestUrl,
+        input.threadId,
+        input.assistantMessageId,
+        input.toolCallId,
+      ],
+    );
+    return toPullRequestProvenance(rows[0]!);
+  }
+
+  async getPullRequestProvenance(
+    githubProjectId: string,
+    repositoryId: number,
+    pullRequestNumber: number,
+  ): Promise<GithubPullRequestProvenanceRow | null> {
+    const { rows } = await this.#db.query<PullRequestProvenanceDbRow>(
+      `SELECT * FROM github_pull_request_provenance
+       WHERE github_project_id = $1 AND repository_id = $2 AND pull_request_number = $3`,
+      [githubProjectId, repositoryId, pullRequestNumber],
+    );
+    return rows[0] ? toPullRequestProvenance(rows[0]) : null;
   }
 
   // ── Project sandboxes ─────────────────────────────────────────────────────

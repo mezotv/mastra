@@ -21,8 +21,10 @@ import { buildFsRoutes } from './fs-routes.js';
 import { buildOAuthRoutes } from './oauth-routes.js';
 import { getGithubFeatureDiagnostics, isGithubFeatureEnabled } from './github/config.js';
 import { buildFactoryRoutes } from './factory/routes.js';
+import { FactoryGithubEventService } from './factory/rules/github-service.js';
 import { FactoryStartCoordinator } from './factory/rules/start-coordinator.js';
 import { FactoryTransitionService } from './factory/rules/transition-service.js';
+import type { GithubIntegration } from './github/integration.js';
 import type { GithubStorage } from './github/storage/base.js';
 import { buildIntakeRoutes } from './intake/routes.js';
 import { getFactoryStore, getSeededFactoryRules, getSeededStateSigner } from './runtime-config.js';
@@ -382,13 +384,31 @@ function disabledIntegrationStatusRoutes(id: string): ApiRoute[] {
 export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
   const registrations = deps.integrations ?? [];
   const githubRegistration = registrations.find(({ integration }) => integration.id === 'github');
-  const githubStorage = githubRegistration?.integration.storageDomain as GithubStorage | undefined;
+  const githubIntegration = githubRegistration?.integration as GithubIntegration | undefined;
+  const githubStorage = githubIntegration?.storageDomain as GithubStorage | undefined;
+  const workItems = deps.factoryReady ? getFactoryStore().workItems : undefined;
+  const githubEventService =
+    githubIntegration && workItems
+      ? new FactoryGithubEventService({
+          github: githubIntegration,
+          storage: workItems,
+          rules: getSeededFactoryRules()!,
+        })
+      : undefined;
   const ctx = deps.stateSigner
     ? {
         baseUrl: deps.publicOrigin,
         controller: deps.controller,
         stateSigner: deps.stateSigner,
-        hooks: { runIssueTriage: (input: IssueTriageRunInput) => runIssueTriage(deps, input) },
+        hooks: {
+          runIssueTriage: (input: IssueTriageRunInput) => runIssueTriage(deps, input),
+          ...(githubEventService
+            ? {
+                ingestGithubEvent: (event: Parameters<typeof githubEventService.ingest>[0]) =>
+                  githubEventService.ingest(event),
+              }
+            : {}),
+        },
       }
     : undefined;
   const integrationRoutes = registrations.flatMap(registration => {
@@ -439,8 +459,7 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
     .filter(id => !registrations.some(({ integration }) => integration.id === id))
     .flatMap(disabledIntegrationStatusRoutes);
   const factoryRoutes = (() => {
-    if (!deps.factoryReady) return [];
-    const workItems = getFactoryStore().workItems;
+    if (!deps.factoryReady || !workItems) return [];
     const transitionService =
       deps.factoryTransitionService ??
       new FactoryTransitionService({ rules: getSeededFactoryRules(), storage: workItems });

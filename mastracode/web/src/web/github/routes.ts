@@ -38,7 +38,7 @@ import { getGithubFeatureDiagnostics, isGithubFeatureEnabled } from './config';
 import type { GithubIntegration } from './integration';
 import { withProjectLock } from './project-lock';
 import { handleGithubWebhook } from './webhook';
-import type { GithubIssueTriageRunInput, GithubIssueTriageRunResult } from './webhook';
+import type { GithubIssueTriageRunInput, GithubIssueTriageRunResult, ParsedGithubWebhook } from './webhook';
 import {
   computeSandboxWorkdir,
   getSandboxProvider,
@@ -89,6 +89,8 @@ export interface MountGithubRoutesOptions {
   controller?: MountedMastraCode['controller'];
   /** Run seam used by GitHub webhooks and manual Intake triage. */
   runIssueTriage?: (input: GithubIssueTriageRunInput) => Promise<GithubIssueTriageRunResult>;
+  /** Authoritative Factory rule ingress for normalized, signature-verified GitHub deliveries. */
+  ingestFactoryEvent?: (event: ParsedGithubWebhook) => Promise<unknown>;
 }
 
 function pullRequestNumberFromUrl(value: string, expectedRepo: string): number | undefined {
@@ -342,6 +344,7 @@ export function buildGithubRoutes(options: MountGithubRoutesOptions = {}): ApiRo
         const result = await handleGithubWebhook(loose(c), {
           github,
           runIssueTriage: runBoardIssueTriage,
+          ingestFactoryEvent: options.ingestFactoryEvent,
           ...(options.controller
             ? {
                 controller: options.controller,

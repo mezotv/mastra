@@ -21,6 +21,7 @@ import type { MastraCodeConfig, MountedMastraCode } from '@mastra/code-sdk';
 import type { RequestContext } from '@mastra/core/request-context';
 import type { ApiRoute } from '@mastra/core/server';
 
+import type { ParsedGithubWebhook } from './github/webhook.js';
 import type { StateSigner } from './state-signing.js';
 import type { FactoryStorageDomain } from './storage/domain.js';
 
@@ -52,6 +53,7 @@ export interface IssueTriageRunResult {
 /** System hooks integrations may invoke (e.g. GitHub webhook → issue triage). */
 export interface IntegrationHooks {
   runIssueTriage?: (input: IssueTriageRunInput) => Promise<IssueTriageRunResult>;
+  ingestGithubEvent?: (event: ParsedGithubWebhook) => Promise<unknown>;
 }
 
 /**

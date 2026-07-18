@@ -1,0 +1,144 @@
+import { describe, expect, it, vi } from 'vitest';
+import { GithubStorageInMemory } from '../../github/storage/inmemory.js';
+import type { GithubIntegration } from '../../github/integration.js';
+import { WorkItemsStorageInMemory } from '../../storage/domains/work-items/inmemory.js';
+import { builtInFactoryRules, defaultFactoryRules } from './defaults.js';
+import { FactoryGithubEventService } from './github-service.js';
+
+async function setup(permission: string | undefined) {
+  const githubStorage = new GithubStorageInMemory();
+  const workItems = new WorkItemsStorageInMemory();
+  const project = await githubStorage.upsertProject({
+    orgId: 'org-1',
+    userId: 'user-1',
+    installationId: 7,
+    repoFullName: 'acme/repo',
+    repoId: 10,
+    defaultBranch: 'main',
+    sandboxProvider: 'local',
+    sandboxWorkdir: '/workspace',
+  });
+  const github = {
+    storageDomain: githubStorage,
+    getRepositoryCollaboratorPermission: vi.fn().mockResolvedValue(permission),
+  } as unknown as GithubIntegration;
+  return { githubStorage, workItems, project, github };
+}
+
+function issueOpened(deliveryId = 'delivery-1') {
+  return {
+    event: 'issues',
+    deliveryId,
+    payload: {
+      action: 'opened',
+      installation: { id: 7 },
+      repository: { id: 10, full_name: 'acme/repo' },
+      sender: { login: 'maintainer' },
+      issue: { number: 42, title: 'Issue 42', html_url: 'https://github.com/acme/repo/issues/42' },
+    },
+  };
+}
+
+function pullRequest(event: 'opened' | 'closed', deliveryId: string, merged = false) {
+  return {
+    event: 'pull_request',
+    deliveryId,
+    payload: {
+      action: event,
+      installation: { id: 7 },
+      repository: { id: 10, full_name: 'acme/repo' },
+      sender: { login: 'contributor' },
+      pull_request: {
+        number: 17,
+        title: 'PR 17',
+        html_url: 'https://github.com/acme/repo/pull/17',
+        state: merged ? 'closed' : 'open',
+        merged,
+        head: { ref: 'feature' },
+        base: { ref: 'main' },
+      },
+    },
+  };
+}
+
+describe('FactoryGithubEventService', () => {
+  it('commits one trusted issue intake decision and replays immutable delivery ingress', async () => {
+    const { github, workItems, project } = await setup('write');
+    const service = new FactoryGithubEventService({ github, storage: workItems, rules: builtInFactoryRules() });
+
+    await expect(service.ingest(issueOpened())).resolves.toEqual({ status: 'committed' });
+    await expect(service.ingest(issueOpened())).resolves.toEqual({ status: 'replayed' });
+    const decisions = await workItems.listDeferredDecisions('org-1', project.id);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.actor).toMatchObject({ type: 'github', login: 'maintainer', trusted: true });
+    expect(decisions[0]?.decision).toMatchObject({ type: 'upsertLinkedWorkItem', source: 'github-issue' });
+  });
+
+  it.each(['maintain', 'triage', 'read', undefined])('fails closed for GitHub permission %s', async permission => {
+    const { github, workItems, project } = await setup(permission);
+    const seen = vi.fn(() => undefined);
+    const rules = defaultFactoryRules({ version: 'test-1', overrides: { github: { issueOpened: { onEvent: seen } } } });
+    const service = new FactoryGithubEventService({ github, storage: workItems, rules });
+
+    await service.ingest(issueOpened(`delivery-${permission ?? 'missing'}`));
+    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ actor: expect.objectContaining({ trusted: false }) }));
+    expect(await workItems.listDeferredDecisions('org-1', project.id)).toEqual([]);
+  });
+
+  it('uses verified Factory provenance to link an opened Review card and remind Work on merge', async () => {
+    const { github, githubStorage, workItems, project } = await setup('read');
+    const work = await workItems.upsert({
+      orgId: 'org-1',
+      userId: 'user-1',
+      githubProjectId: project.id,
+      input: {
+        source: 'github-issue',
+        sourceKey: 'github:10:issue:42',
+        title: 'Issue 42',
+        url: 'https://github.com/acme/repo/issues/42',
+        stages: ['execute'],
+        sessions: {},
+        metadata: {},
+      },
+    });
+    await githubStorage.recordPullRequestProvenance({
+      orgId: 'org-1',
+      githubProjectId: project.id,
+      bindingId: 'binding-1',
+      workItemId: work.item.id,
+      repositoryId: 10,
+      pullRequestNumber: 17,
+      pullRequestUrl: 'https://github.com/acme/repo/pull/17',
+      threadId: 'thread-1',
+      assistantMessageId: 'message-1',
+      toolCallId: 'call-1',
+    });
+    const service = new FactoryGithubEventService({ github, storage: workItems, rules: builtInFactoryRules() });
+
+    await service.ingest(pullRequest('opened', 'delivery-open'));
+    await service.ingest(pullRequest('closed', 'delivery-merge', true));
+    const decisions = await workItems.listDeferredDecisions('org-1', project.id);
+    expect(decisions[0]).toMatchObject({ workItemId: work.item.id, decision: { type: 'upsertLinkedWorkItem' } });
+    expect(decisions[1]).toMatchObject({ workItemId: work.item.id, decision: { type: 'sendMessage', role: 'work' } });
+    expect(decisions[1]?.decision).not.toMatchObject({ type: 'transition' });
+  });
+
+  it('evaluates the same delivery independently for every tenant project mapped to the repository', async () => {
+    const { github, githubStorage, workItems, project } = await setup('write');
+    const second = await githubStorage.upsertProject({
+      orgId: 'org-2',
+      userId: 'user-2',
+      installationId: 7,
+      repoFullName: 'acme/repo',
+      repoId: 10,
+      defaultBranch: 'main',
+      sandboxProvider: 'local',
+      sandboxWorkdir: '/workspace',
+    });
+    const service = new FactoryGithubEventService({ github, storage: workItems, rules: builtInFactoryRules() });
+
+    await service.ingest(issueOpened('multi-tenant'));
+    expect(await workItems.listDeferredDecisions('org-1', project.id)).toHaveLength(1);
+    expect(await workItems.listDeferredDecisions('org-2', second.id)).toHaveLength(1);
+  });
+});

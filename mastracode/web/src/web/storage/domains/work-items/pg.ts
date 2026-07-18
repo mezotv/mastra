@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS factory_rule_evaluations (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE factory_rule_evaluations
-  ADD COLUMN IF NOT EXISTS causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb;
+  ADD COLUMN IF NOT EXISTS causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb,
+  ALTER COLUMN work_item_id DROP NOT NULL,
+  ALTER COLUMN expected_revision DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS factory_deferred_decisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -104,6 +106,7 @@ CREATE TABLE IF NOT EXISTS factory_deferred_decisions (
   effect_ordinal integer NOT NULL,
   effect_hash text NOT NULL,
   causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb,
+  actor jsonb,
   decision jsonb NOT NULL,
   status text NOT NULL DEFAULT 'pending',
   attempts integer NOT NULL DEFAULT 0,
@@ -121,6 +124,7 @@ ALTER TABLE factory_deferred_decisions
   ADD COLUMN IF NOT EXISTS effect_ordinal integer NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS effect_hash text NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS causal_chain jsonb NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS actor jsonb,
   ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS lease_owner text,
@@ -137,7 +141,8 @@ WHERE decision.evaluation_id = evaluation.id
   AND (decision.org_id IS NULL OR decision.github_project_id IS NULL);
 ALTER TABLE factory_deferred_decisions
   ALTER COLUMN org_id SET NOT NULL,
-  ALTER COLUMN github_project_id SET NOT NULL;
+  ALTER COLUMN github_project_id SET NOT NULL,
+  ALTER COLUMN work_item_id DROP NOT NULL;
 ALTER TABLE factory_deferred_decisions
   DROP CONSTRAINT IF EXISTS factory_deferred_decisions_idempotency_key_key;
 CREATE UNIQUE INDEX IF NOT EXISTS factory_deferred_decisions_tenant_key_unique
@@ -279,11 +284,12 @@ interface DeferredDecisionDbRow {
   org_id: string;
   github_project_id: string;
   evaluation_id: string;
-  work_item_id: string;
+  work_item_id: string | null;
   idempotency_key: string;
   effect_ordinal: number;
   effect_hash: string;
   causal_chain: Array<{ ingressId: string; decisionType: string }>;
+  actor: Record<string, unknown> | null;
   decision: Record<string, unknown>;
   status: FactoryDeferredDecisionRecord['status'];
   attempts: number;
@@ -353,6 +359,7 @@ function toDeferredDecision(row: DeferredDecisionDbRow): FactoryDeferredDecision
     effectOrdinal: row.effect_ordinal,
     effectHash: row.effect_hash,
     causalChain: row.causal_chain,
+    actor: row.actor,
     decision: row.decision,
     status: row.status,
     attempts: row.attempts,
@@ -690,21 +697,31 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       );
       if (prior.rows[0]) return { status: 'replayed', result: prior.rows[0].result };
 
-      const itemResult = await client.query<WorkItemDbRow>(
-        'SELECT * FROM work_items WHERE org_id = $1 AND github_project_id = $2 AND id = $3 FOR UPDATE',
-        [input.orgId, input.githubProjectId, input.workItemId],
-      );
-      const item = itemResult.rows[0];
-      if (!item) return { status: 'missing' };
+      const item = input.workItemId
+        ? (
+            await client.query<WorkItemDbRow>(
+              'SELECT * FROM work_items WHERE org_id = $1 AND github_project_id = $2 AND id = $3 FOR UPDATE',
+              [input.orgId, input.githubProjectId, input.workItemId],
+            )
+          ).rows[0]
+        : undefined;
+      if (input.workItemId !== null && !item) return { status: 'missing' };
 
-      const stale = item.revision !== input.expectedRevision;
+      const stale = item !== undefined && item.revision !== input.expectedRevision;
       const outcome = stale ? 'rejected' : input.outcome.status;
       const code = stale ? 'stale' : (input.outcome.code ?? null);
       const reason = stale
         ? 'The work item changed before this rule evaluation committed.'
         : (input.outcome.reason ?? null);
       const decisions = outcome === 'accepted' ? input.decisions : [];
-      const result = { status: outcome, itemId: item.id, revision: item.revision, code, reason, decisions };
+      const result = {
+        status: outcome,
+        itemId: item?.id ?? null,
+        revision: item?.revision ?? null,
+        code,
+        reason,
+        decisions,
+      };
       const ingress = await client.query<{ id: string }>(
         `INSERT INTO factory_rule_ingress
            (org_id, github_project_id, identity, trigger_type, transition_id, result, created_at)
@@ -726,7 +743,7 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
          RETURNING id`,
         [
           ingress.rows[0]!.id,
-          item.id,
+          item?.id ?? null,
           input.ruleSetVersion,
           input.expectedRevision,
           outcome,
@@ -740,18 +757,19 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
         await client.query(
           `INSERT INTO factory_deferred_decisions
              (org_id, github_project_id, evaluation_id, work_item_id, idempotency_key,
-              effect_ordinal, effect_hash, causal_chain, decision, status, attempts, available_at, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, 'pending', 0, $10, $10, $10)
+              effect_ordinal, effect_hash, causal_chain, actor, decision, status, attempts, available_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, 'pending', 0, $11, $11, $11)
            ON CONFLICT (org_id, github_project_id, idempotency_key) DO NOTHING`,
           [
             input.orgId,
             input.githubProjectId,
             evaluation.rows[0]!.id,
-            item.id,
+            item?.id ?? null,
             String(decision.idempotencyKey),
             effectOrdinal,
             factoryDecisionHash(decision),
             JSON.stringify(input.causalChain),
+            input.actor === null ? null : JSON.stringify(input.actor),
             JSON.stringify(decision),
             input.now,
           ],

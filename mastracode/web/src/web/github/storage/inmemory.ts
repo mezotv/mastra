@@ -12,6 +12,7 @@ import type {
   GithubInstallationRow,
   GithubProjectRow,
   GithubProjectSandboxRow,
+  GithubPullRequestProvenanceRow,
   GithubSignalSubscriptionRow,
   GithubSignalSubscriptionStatus,
   GithubWebhookPullRequestTarget,
@@ -19,6 +20,7 @@ import type {
   NewGithubInstallation,
   NewGithubSignalSubscription,
   PullRequestSubscriptionTarget,
+  RecordGithubPullRequestProvenanceInput,
   SubscribeToPullRequestInput,
   ThreadSubscriptionTarget,
   UpsertGithubProjectInput,
@@ -28,6 +30,7 @@ import type {
 export class GithubStorageInMemory extends GithubStorage {
   installations: GithubInstallationRow[] = [];
   projects: GithubProjectRow[] = [];
+  pullRequestProvenance: GithubPullRequestProvenanceRow[] = [];
   sandboxes: GithubProjectSandboxRow[] = [];
   worktrees: GithubWorktreeRow[] = [];
   subscriptions: GithubSignalSubscriptionRow[] = [];
@@ -72,6 +75,10 @@ export class GithubStorageInMemory extends GithubStorage {
     );
   }
 
+  async findProjectsByRepo(installationId: number, repoFullName: string): Promise<GithubProjectRow[]> {
+    return this.projects.filter(row => row.installationId === installationId && row.repoFullName === repoFullName);
+  }
+
   async upsertProject(input: UpsertGithubProjectInput): Promise<GithubProjectRow> {
     const existing = this.projects.find(row => row.orgId === input.orgId && row.repoId === input.repoId);
     if (existing) {
@@ -90,6 +97,35 @@ export class GithubStorageInMemory extends GithubStorage {
   async setProjectSetupCommand(projectId: string, setupCommand: string | null): Promise<void> {
     const row = this.projects.find(project => project.id === projectId);
     if (row) row.setupCommand = setupCommand;
+  }
+
+  async recordPullRequestProvenance(
+    input: RecordGithubPullRequestProvenanceInput,
+  ): Promise<GithubPullRequestProvenanceRow> {
+    const existing = await this.getPullRequestProvenance(
+      input.githubProjectId,
+      input.repositoryId,
+      input.pullRequestNumber,
+    );
+    if (existing) return existing;
+    const created = { id: randomUUID(), createdAt: new Date(), ...input };
+    this.pullRequestProvenance.push(created);
+    return created;
+  }
+
+  async getPullRequestProvenance(
+    githubProjectId: string,
+    repositoryId: number,
+    pullRequestNumber: number,
+  ): Promise<GithubPullRequestProvenanceRow | null> {
+    return (
+      this.pullRequestProvenance.find(
+        row =>
+          row.githubProjectId === githubProjectId &&
+          row.repositoryId === repositoryId &&
+          row.pullRequestNumber === pullRequestNumber,
+      ) ?? null
+    );
   }
 
   // ── Project sandboxes ─────────────────────────────────────────────────────

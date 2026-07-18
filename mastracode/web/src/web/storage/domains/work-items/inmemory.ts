@@ -187,6 +187,7 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
           effectOrdinal,
           effectHash: factoryDecisionHash(decision),
           causalChain: structuredClone(input.causalChain),
+          actor: null,
           decision: structuredClone(decision),
           status: 'pending',
           attempts: 0,
@@ -215,7 +216,7 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     this.#evaluations.set(evaluationId, {
       id: evaluationId,
       ingressId,
-      workItemId: item.id,
+      workItemId: item?.id ?? null,
       ruleSetVersion: input.ruleSetVersion,
       expectedRevision: input.expectedRevision,
       outcome,
@@ -231,21 +232,31 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     const ingressKey = `${input.orgId}:${input.githubProjectId}:${input.ingress.identity}`;
     const priorIngress = this.#ingress.get(ingressKey);
     if (priorIngress) return { status: 'replayed', result: structuredClone(priorIngress.result) };
-    const item = this.#items.get(input.workItemId);
-    if (!item || item.orgId !== input.orgId || item.githubProjectId !== input.githubProjectId) {
+    const item = input.workItemId ? this.#items.get(input.workItemId) : undefined;
+    if (
+      input.workItemId !== null &&
+      (!item || item.orgId !== input.orgId || item.githubProjectId !== input.githubProjectId)
+    ) {
       return { status: 'missing' };
     }
 
     const ingressId = randomUUID();
     const evaluationId = randomUUID();
-    const stale = item.revision !== input.expectedRevision;
+    const stale = item !== undefined && item.revision !== input.expectedRevision;
     const outcome = stale ? 'rejected' : input.outcome.status;
     const code = stale ? 'stale' : (input.outcome.code ?? null);
     const reason = stale
       ? 'The work item changed before this rule evaluation committed.'
       : (input.outcome.reason ?? null);
     const decisions = outcome === 'accepted' ? input.decisions : [];
-    const result = { status: outcome, itemId: item.id, revision: item.revision, code, reason, decisions };
+    const result = {
+      status: outcome,
+      itemId: item?.id ?? null,
+      revision: item?.revision ?? null,
+      code,
+      reason,
+      decisions,
+    };
 
     this.#ingress.set(ingressKey, {
       id: ingressId,
@@ -260,7 +271,7 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     this.#evaluations.set(evaluationId, {
       id: evaluationId,
       ingressId,
-      workItemId: item.id,
+      workItemId: item?.id ?? null,
       ruleSetVersion: input.ruleSetVersion,
       expectedRevision: input.expectedRevision,
       outcome,
@@ -278,11 +289,12 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
         orgId: input.orgId,
         githubProjectId: input.githubProjectId,
         evaluationId,
-        workItemId: item.id,
+        workItemId: item?.id ?? null,
         idempotencyKey,
         effectOrdinal,
         effectHash: factoryDecisionHash(decision),
         causalChain: structuredClone(input.causalChain),
+        actor: input.actor ? structuredClone(input.actor) : null,
         decision: structuredClone(decision),
         status: 'pending',
         attempts: 0,

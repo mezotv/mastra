@@ -106,10 +106,11 @@ export interface FactoryRuleIngressRecord {
 export interface CommitFactoryRuleEvaluationInput {
   orgId: string;
   githubProjectId: string;
-  workItemId: string;
+  workItemId: string | null;
   ingress: { identity: string; triggerType: string };
   ruleSetVersion: string;
-  expectedRevision: number;
+  expectedRevision: number | null;
+  actor: Record<string, unknown> | null;
   outcome: { status: 'accepted' | 'rejected'; code?: string; reason?: string };
   decisions: Record<string, unknown>[];
   causalChain: Array<{ ingressId: string; decisionType: string }>;
@@ -133,9 +134,9 @@ export interface FactoryToolResultCursorRecord {
 export interface FactoryRuleEvaluationRecord {
   id: string;
   ingressId: string;
-  workItemId: string;
+  workItemId: string | null;
   ruleSetVersion: string;
-  expectedRevision: number;
+  expectedRevision: number | null;
   outcome: 'accepted' | 'rejected';
   code: string | null;
   reason: string | null;
@@ -150,11 +151,12 @@ export interface FactoryDeferredDecisionRecord {
   orgId: string;
   githubProjectId: string;
   evaluationId: string;
-  workItemId: string;
+  workItemId: string | null;
   idempotencyKey: string;
   effectOrdinal: number;
   effectHash: string;
   causalChain: Array<{ ingressId: string; decisionType: string }>;
+  actor: Record<string, unknown> | null;
   decision: Record<string, unknown>;
   status: FactoryDispatchStatus;
   attempts: number;
@@ -478,9 +480,7 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   abstract findActiveRunBinding(address: FactoryRunBindingAddress): Promise<FactoryRunBindingRecord | null>;
 
   /** Resolve exact bound-session state for processor awareness; ambiguous cross-tenant matches return null. */
-  abstract findRunBindingBySession(
-    address: FactoryRunBindingSessionAddress,
-  ): Promise<FactoryRunBindingRecord | null>;
+  abstract findRunBindingBySession(address: FactoryRunBindingSessionAddress): Promise<FactoryRunBindingRecord | null>;
 
   /** Revoke one exact tenant-scoped binding. */
   abstract revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null>;

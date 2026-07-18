@@ -86,6 +86,21 @@ export type GithubSignalSubscriptionSource = 'auto-gh-pr-create' | 'factory-pr-c
 export type GithubSignalSubscriptionStatus = 'open' | 'closed' | 'merged';
 
 /** A session's subscription to a pull request's webhook signals. */
+export interface GithubPullRequestProvenanceRow {
+  id: string;
+  orgId: string;
+  githubProjectId: string;
+  bindingId: string;
+  workItemId: string;
+  repositoryId: number;
+  pullRequestNumber: number;
+  pullRequestUrl: string;
+  threadId: string;
+  assistantMessageId: string;
+  toolCallId: string;
+  createdAt: Date;
+}
+
 export interface GithubSignalSubscriptionRow {
   id: string;
   orgId: string;
@@ -134,6 +149,19 @@ export interface UpsertGithubWorktreeInput {
   branch: string;
   baseBranch: string;
   worktreePath: string;
+}
+
+export interface RecordGithubPullRequestProvenanceInput {
+  orgId: string;
+  githubProjectId: string;
+  bindingId: string;
+  workItemId: string;
+  repositoryId: number;
+  pullRequestNumber: number;
+  pullRequestUrl: string;
+  threadId: string;
+  assistantMessageId: string;
+  toolCallId: string;
 }
 
 export interface SubscribeToPullRequestInput {
@@ -199,11 +227,24 @@ export abstract class GithubStorage implements FactoryStorageDomain {
   abstract getOrgProject(orgId: string, projectId: string): Promise<GithubProjectRow | null>;
   /** Unscoped lookup by id (project-id → org resolution for agent tools). */
   abstract getProjectById(projectId: string): Promise<GithubProjectRow | null>;
-  /** Webhook-side lookup: resolve the project from (installation, repo). */
+  /** Webhook-side lookup: resolve one project from (installation, repo). */
   abstract findProjectByRepo(installationId: number, repoFullName: string): Promise<GithubProjectRow | null>;
+  /** Factory webhook lookup across every tenant connected to the installation repository. */
+  abstract findProjectsByRepo(installationId: number, repoFullName: string): Promise<GithubProjectRow[]>;
   /** Insert or, when `(orgId, repoId)` exists, refresh the repo metadata. */
   abstract upsertProject(input: UpsertGithubProjectInput): Promise<GithubProjectRow>;
   abstract setProjectSetupCommand(projectId: string, setupCommand: string | null): Promise<void>;
+
+  // ── Pull request provenance ───────────────────────────────────────────────
+
+  abstract recordPullRequestProvenance(
+    input: RecordGithubPullRequestProvenanceInput,
+  ): Promise<GithubPullRequestProvenanceRow>;
+  abstract getPullRequestProvenance(
+    githubProjectId: string,
+    repositoryId: number,
+    pullRequestNumber: number,
+  ): Promise<GithubPullRequestProvenanceRow | null>;
 
   // ── Project sandboxes ─────────────────────────────────────────────────────
 

@@ -381,6 +381,7 @@ function buildApp(
   options: {
     controller?: NonNullable<Parameters<typeof buildGithubRoutes>[0]>['controller'];
     runIssueTriage?: (input: any) => Promise<{ threadId?: string; projectPath?: string; branch?: string }>;
+    ingestFactoryEvent?: NonNullable<Parameters<typeof buildGithubRoutes>[0]>['ingestFactoryEvent'];
     stateSigner?: typeof stateSigner | null;
   } = {},
 ) {
@@ -507,6 +508,28 @@ describe('webhook route', () => {
       projectPath: '/workspace/worktrees/factory-issue-12-aeab418d',
       branch: 'factory/issue-12',
     });
+  });
+
+  it('routes a supported event through Factory authority instead of legacy issue triage', async () => {
+    seedMaterializedProject();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const ingestFactoryEvent = vi.fn(async () => undefined);
+    const runIssueTriage = vi.fn(async () => ({ threadId: 'legacy-triage' }));
+    const request = signedGithubWebhookRequest('issues', {
+      action: 'opened',
+      repository: { id: 99, full_name: 'octo/hello' },
+      issue: { number: 12, title: 'Fix flaky test', html_url: 'https://github.com/octo/hello/issues/12' },
+      sender: { login: 'ada' },
+      installation: { id: 7 },
+    });
+
+    const res = await buildApp(null, { ingestFactoryEvent, runIssueTriage }).request(request);
+
+    expect(res.status).toBe(202);
+    expect(ingestFactoryEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'issues', deliveryId: 'delivery-1' }),
+    );
+    expect(runIssueTriage).not.toHaveBeenCalled();
   });
 
   it('accepts a valid signed PR review comment event and logs normalized PR metadata', async () => {
