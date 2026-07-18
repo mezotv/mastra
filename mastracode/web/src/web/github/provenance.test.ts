@@ -96,4 +96,12 @@ describe('recordFactoryPullRequestProvenance', () => {
     await recordFactoryPullRequestProvenance(github, input);
     await expect(storage.getPullRequestProvenance(project.id, 10, 17)).resolves.toBeNull();
   });
+
+  it('fails closed when pull request verification is unavailable', async () => {
+    const { storage, project, github, input, pullsGet } = await setup();
+    pullsGet.mockRejectedValueOnce(new Error('GitHub unavailable'));
+
+    await expect(recordFactoryPullRequestProvenance(github, input)).resolves.toBeUndefined();
+    await expect(storage.getPullRequestProvenance(project.id, 10, 17)).resolves.toBeNull();
+  });
 });

@@ -109,10 +109,27 @@ CREATE TABLE IF NOT EXISTS github_pull_request_provenance (
   thread_id text NOT NULL,
   assistant_message_id text NOT NULL,
   tool_call_id text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (github_project_id, repository_id, pull_request_number),
-  UNIQUE (binding_id, thread_id, assistant_message_id, tool_call_id)
+  created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE github_pull_request_provenance ADD COLUMN IF NOT EXISTS work_item_id uuid;
+ALTER TABLE github_pull_request_provenance ADD COLUMN IF NOT EXISTS thread_id text;
+ALTER TABLE github_pull_request_provenance ADD COLUMN IF NOT EXISTS assistant_message_id text;
+ALTER TABLE github_pull_request_provenance ADD COLUMN IF NOT EXISTS tool_call_id text;
+
+DELETE FROM github_pull_request_provenance
+  WHERE work_item_id IS NULL OR thread_id IS NULL OR assistant_message_id IS NULL OR tool_call_id IS NULL;
+
+ALTER TABLE github_pull_request_provenance ALTER COLUMN work_item_id SET NOT NULL;
+ALTER TABLE github_pull_request_provenance ALTER COLUMN thread_id SET NOT NULL;
+ALTER TABLE github_pull_request_provenance ALTER COLUMN assistant_message_id SET NOT NULL;
+ALTER TABLE github_pull_request_provenance ALTER COLUMN tool_call_id SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS github_pull_request_provenance_pr_unique
+  ON github_pull_request_provenance (github_project_id, repository_id, pull_request_number);
+
+CREATE UNIQUE INDEX IF NOT EXISTS github_pull_request_provenance_ingress_unique
+  ON github_pull_request_provenance (binding_id, thread_id, assistant_message_id, tool_call_id);
 
 CREATE INDEX IF NOT EXISTS github_pull_request_provenance_project_lookup
   ON github_pull_request_provenance (org_id, github_project_id, repository_id, pull_request_number);
@@ -444,7 +461,7 @@ export class GithubStoragePG extends GithubStorage {
           pull_request_url, thread_id, assistant_message_id, tool_call_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (github_project_id, repository_id, pull_request_number) DO UPDATE
-       SET pull_request_url = EXCLUDED.pull_request_url
+       SET pull_request_url = github_pull_request_provenance.pull_request_url
        RETURNING *`,
       [
         input.orgId,

@@ -26,30 +26,34 @@ export async function recordFactoryPullRequestProvenance(
   });
   if (!url) return;
 
-  const project = await github.storageDomain.getOrgProject(input.binding.orgId, input.binding.githubProjectId);
-  if (!project) return;
-  const match = url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/i);
-  if (!match || match[1]!.toLowerCase() !== project.repoFullName.toLowerCase()) return;
-  const pullRequestNumber = Number(match[2]);
-  const [owner, repo] = project.repoFullName.split('/');
-  if (!owner || !repo || !Number.isInteger(pullRequestNumber) || pullRequestNumber < 1) return;
-  if (await github.storageDomain.getPullRequestProvenance(project.id, project.repoId, pullRequestNumber)) return;
+  try {
+    const project = await github.storageDomain.getOrgProject(input.binding.orgId, input.binding.githubProjectId);
+    if (!project) return;
+    const match = url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/i);
+    if (!match || match[1]!.toLowerCase() !== project.repoFullName.toLowerCase()) return;
+    const pullRequestNumber = Number(match[2]);
+    const [owner, repo] = project.repoFullName.split('/');
+    if (!owner || !repo || !Number.isInteger(pullRequestNumber) || pullRequestNumber < 1) return;
+    if (await github.storageDomain.getPullRequestProvenance(project.id, project.repoId, pullRequestNumber)) return;
 
-  const { data } = await github
-    .getInstallationOctokit(project.installationId)
-    .pulls.get({ owner, repo, pull_number: pullRequestNumber });
-  if (data.base.repo.id !== project.repoId || data.number !== pullRequestNumber || data.html_url !== url) return;
+    const { data } = await github
+      .getInstallationOctokit(project.installationId)
+      .pulls.get({ owner, repo, pull_number: pullRequestNumber });
+    if (data.base.repo.id !== project.repoId || data.number !== pullRequestNumber || data.html_url !== url) return;
 
-  await github.storageDomain.recordPullRequestProvenance({
-    orgId: input.binding.orgId,
-    githubProjectId: project.id,
-    bindingId: input.binding.id,
-    workItemId: input.item.id,
-    repositoryId: project.repoId,
-    pullRequestNumber,
-    pullRequestUrl: url,
-    threadId: input.binding.threadId,
-    assistantMessageId: input.assistantMessageId,
-    toolCallId: input.toolCallId,
-  });
+    await github.storageDomain.recordPullRequestProvenance({
+      orgId: input.binding.orgId,
+      githubProjectId: project.id,
+      bindingId: input.binding.id,
+      workItemId: input.item.id,
+      repositoryId: project.repoId,
+      pullRequestNumber,
+      pullRequestUrl: url,
+      threadId: input.binding.threadId,
+      assistantMessageId: input.assistantMessageId,
+      toolCallId: input.toolCallId,
+    });
+  } catch {
+    return;
+  }
 }

@@ -29,8 +29,13 @@ describe('GithubStoragePG', () => {
     expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_worktrees');
     expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_signal_subscriptions');
     expect(GITHUB_DDL).toContain('CREATE TABLE IF NOT EXISTS github_pull_request_provenance');
-    expect(GITHUB_DDL).toContain('UNIQUE (github_project_id, repository_id, pull_request_number)');
-    expect(GITHUB_DDL).toContain('UNIQUE (binding_id, thread_id, assistant_message_id, tool_call_id)');
+    for (const column of ['work_item_id uuid', 'thread_id text', 'assistant_message_id text', 'tool_call_id text']) {
+      expect(GITHUB_DDL).toContain(`ALTER TABLE github_pull_request_provenance ADD COLUMN IF NOT EXISTS ${column}`);
+    }
+    expect(GITHUB_DDL).toContain('DELETE FROM github_pull_request_provenance');
+    expect(GITHUB_DDL).toContain('ALTER COLUMN work_item_id SET NOT NULL');
+    expect(GITHUB_DDL).toContain('CREATE UNIQUE INDEX IF NOT EXISTS github_pull_request_provenance_pr_unique');
+    expect(GITHUB_DDL).toContain('CREATE UNIQUE INDEX IF NOT EXISTS github_pull_request_provenance_ingress_unique');
     expect(GITHUB_DDL).toContain('CREATE UNIQUE INDEX IF NOT EXISTS github_installations_org_installation_unique');
     expect(GITHUB_DDL).toContain('CREATE UNIQUE INDEX IF NOT EXISTS github_signal_subscriptions_target_pr_unique');
   });
@@ -153,6 +158,8 @@ describe('GithubStoragePG', () => {
       }),
     ).resolves.toMatchObject({ repositoryId: 34, pullRequestNumber: 17, workItemId: 'item-1' });
     expect(queries.at(-1)?.text).toContain('ON CONFLICT (github_project_id, repository_id, pull_request_number)');
+    expect(queries.at(-1)?.text).toContain('pull_request_url = github_pull_request_provenance.pull_request_url');
+    expect(queries.at(-1)?.text).not.toContain('work_item_id = EXCLUDED.work_item_id');
   });
 
   it('refuses queries before init succeeds', async () => {
