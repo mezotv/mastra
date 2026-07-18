@@ -223,6 +223,90 @@ describe('WorkItemsStoragePG', () => {
     expect(claim.values).toEqual([now, 10, 'worker-1', leaseExpiresAt]);
   });
 
+  it('reads a bounded tenant and status scoped decision page with keyset ordering', async () => {
+    const before = { createdAt: new Date('2026-07-02T00:00:00Z'), id: '00000000-0000-4000-8000-000000000002' };
+    const row = {
+      id: '00000000-0000-4000-8000-000000000001',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      evaluation_id: 'evaluation-1',
+      work_item_id: 'wi-1',
+      idempotency_key: 'notify-1',
+      effect_ordinal: 0,
+      effect_hash: 'hash-1',
+      causal_chain: [],
+      actor: null,
+      decision: { type: 'notify', idempotencyKey: 'notify-1', title: 'Moved' },
+      status: 'retry',
+      attempts: 2,
+      available_at: before.createdAt,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error: 'try again',
+      completed_at: null,
+      created_at: new Date('2026-07-01T00:00:00Z'),
+      updated_at: new Date('2026-07-01T00:01:00Z'),
+    };
+    const { queries, ctx } = fakePool(text =>
+      text.includes('ORDER BY created_at DESC, id DESC') ? { rows: [row, { ...row, id: 'extra' }] } : undefined,
+    );
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    const page = await domain.listDeferredDecisionPage({
+      orgId: 'org1',
+      githubProjectId: 'p1',
+      statuses: ['retry', 'failed'],
+      before,
+      limit: 1,
+    });
+
+    expect(page).toMatchObject({ hasMore: true, decisions: [{ id: row.id, status: 'retry', attempts: 2 }] });
+    const query = queries.find(candidate => candidate.text.includes('ORDER BY created_at DESC, id DESC'))!;
+    expect(sqlOf(query)).toContain('org_id = $1 AND github_project_id = $2');
+    expect(sqlOf(query)).toContain('status = ANY($3::text[])');
+    expect(sqlOf(query)).toContain('(created_at, id) < ($4::timestamptz, $5::uuid)');
+    expect(query.values).toEqual(['org1', 'p1', ['retry', 'failed'], before.createdAt, before.id, 2]);
+  });
+
+  it('requeues only a failed decision without changing its durable identity', async () => {
+    const now = new Date('2026-07-02T00:00:00Z');
+    const row = {
+      id: '00000000-0000-4000-8000-000000000001',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      evaluation_id: 'evaluation-1',
+      work_item_id: 'wi-1',
+      idempotency_key: 'notify-1',
+      effect_ordinal: 0,
+      effect_hash: 'hash-1',
+      causal_chain: [],
+      actor: null,
+      decision: { type: 'notify', idempotencyKey: 'notify-1', title: 'Moved' },
+      status: 'retry',
+      attempts: 3,
+      available_at: now,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error: 'terminal failure',
+      completed_at: null,
+      created_at: new Date('2026-07-01T00:00:00Z'),
+      updated_at: now,
+    };
+    const { queries, ctx } = fakePool(text =>
+      text.includes("AND status = 'failed'") && text.includes('RETURNING *') ? { rows: [row] } : undefined,
+    );
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    const retried = await domain.retryDeferredDecision('org1', 'p1', row.id, now);
+
+    expect(retried).toMatchObject({ id: row.id, evaluationId: 'evaluation-1', status: 'retry', attempts: 3 });
+    const query = queries.find(candidate => candidate.text.includes("AND status = 'failed'"))!;
+    expect(query.values).toEqual([now, row.id, 'org1', 'p1']);
+    expect(sqlOf(query)).toContain("WHERE id = $2 AND org_id = $3 AND github_project_id = $4 AND status = 'failed'");
+  });
+
   it('commits CAS movement, ingress, evaluation, and deferred decisions in one transaction', async () => {
     const movedRow = {
       ...dbRow,

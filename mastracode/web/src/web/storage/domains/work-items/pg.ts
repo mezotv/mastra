@@ -25,6 +25,8 @@ import type {
   CommitFactoryTransitionInput,
   CommitFactoryTransitionResult,
   CreateWorkItemInput,
+  FactoryDeferredDecisionPage,
+  FactoryDeferredDecisionPageInput,
   FactoryDeferredDecisionRecord,
   FactoryDispatchFailureInput,
   FactoryLeaseClaimInput,
@@ -825,6 +827,29 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
     return rows.map(toDeferredDecision);
   }
 
+  async listDeferredDecisionPage(input: FactoryDeferredDecisionPageInput): Promise<FactoryDeferredDecisionPage> {
+    const { rows } = await this.#db.query<DeferredDecisionDbRow>(
+      `SELECT * FROM factory_deferred_decisions
+       WHERE org_id = $1 AND github_project_id = $2
+         AND ($3::text[] IS NULL OR status = ANY($3::text[]))
+         AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::uuid))
+       ORDER BY created_at DESC, id DESC
+       LIMIT $6`,
+      [
+        input.orgId,
+        input.githubProjectId,
+        input.statuses ?? null,
+        input.before?.createdAt ?? null,
+        input.before?.id ?? null,
+        input.limit + 1,
+      ],
+    );
+    return {
+      decisions: rows.slice(0, input.limit).map(toDeferredDecision),
+      hasMore: rows.length > input.limit,
+    };
+  }
+
   async claimDeferredDecisions(input: FactoryLeaseClaimInput): Promise<FactoryDeferredDecisionRecord[]> {
     const { rows } = await this.#db.query<DeferredDecisionDbRow>(
       `WITH candidates AS (
@@ -896,6 +921,23 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
         input.githubProjectId,
         input.ownerId,
       ],
+    );
+    return rows[0] ? toDeferredDecision(rows[0]) : null;
+  }
+
+  async retryDeferredDecision(
+    orgId: string,
+    githubProjectId: string,
+    decisionId: string,
+    now: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null> {
+    const { rows } = await this.#db.query<DeferredDecisionDbRow>(
+      `UPDATE factory_deferred_decisions
+       SET status = 'retry', available_at = $1, lease_owner = NULL, lease_expires_at = NULL,
+           completed_at = NULL, updated_at = $1
+       WHERE id = $2 AND org_id = $3 AND github_project_id = $4 AND status = 'failed'
+       RETURNING *`,
+      [now, decisionId, orgId, githubProjectId],
     );
     return rows[0] ? toDeferredDecision(rows[0]) : null;
   }

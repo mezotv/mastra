@@ -467,6 +467,7 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
     return buildFactoryRoutes(githubStorage, {
       transitionService,
       startCoordinator: new FactoryStartCoordinator(deps.controller, workItems, transitionService),
+      decisionStorage: workItems,
     });
   })();
   return [

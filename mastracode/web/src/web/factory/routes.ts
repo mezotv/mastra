@@ -7,6 +7,8 @@
  * the same cards while `created_by` / stage history record who acted.
  */
 
+import { Buffer } from 'node:buffer';
+
 import type { ApiRoute } from '@mastra/core/server';
 import { registerApiRoute } from '@mastra/core/server';
 import type { Context } from 'hono';
@@ -15,7 +17,12 @@ import { emitAudit } from '../audit/audit';
 import { ensureWebAuthUser, webAuthTenant } from '../auth';
 import type { GithubStorage } from '../github/storage/base';
 import { clampMetricsWindow, computeFactoryMetrics } from './metrics';
-import type { WorkItemRow } from '../storage/domains/work-items/base';
+import type {
+  FactoryDeferredDecisionRecord,
+  FactoryDispatchStatus,
+  WorkItemRow,
+  WorkItemsStorage,
+} from '../storage/domains/work-items/base';
 import { FactoryStartCoordinator, FactoryStartTransitionError } from './rules/start-coordinator';
 import type { FactoryStartPreparedResult, FactoryStartRequest } from './rules/start-coordinator';
 import { FactoryTransitionService } from './rules/transition-service';
@@ -144,9 +151,68 @@ async function auditWorkItemPatch(
   }
 }
 
+const DECISION_STATUSES = new Set<FactoryDispatchStatus>(['pending', 'leased', 'retry', 'succeeded', 'failed']);
+const DEFAULT_DECISION_PAGE_SIZE = 25;
+const MAX_DECISION_PAGE_SIZE = 50;
+
+function parseDecisionStatuses(raw: string | undefined): FactoryDispatchStatus[] | undefined {
+  if (!raw) return undefined;
+  const statuses = [...new Set(raw.split(',').map(status => status.trim()))].filter(
+    (status): status is FactoryDispatchStatus => DECISION_STATUSES.has(status as FactoryDispatchStatus),
+  );
+  return statuses.length > 0 ? statuses : undefined;
+}
+
+function parseDecisionLimit(raw: string | undefined): number {
+  const parsed = raw ? Number.parseInt(raw, 10) : DEFAULT_DECISION_PAGE_SIZE;
+  if (!Number.isFinite(parsed)) return DEFAULT_DECISION_PAGE_SIZE;
+  return Math.max(1, Math.min(MAX_DECISION_PAGE_SIZE, parsed));
+}
+
+function encodeDecisionCursor(decision: FactoryDeferredDecisionRecord): string {
+  return Buffer.from(JSON.stringify([decision.createdAt.toISOString(), decision.id]), 'utf8').toString('base64url');
+}
+
+function parseDecisionCursor(raw: string | undefined): { createdAt: Date; id: string } | undefined {
+  if (!raw) return undefined;
+  try {
+    const decoded = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as unknown;
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 2 ||
+      typeof decoded[0] !== 'string' ||
+      typeof decoded[1] !== 'string'
+    ) {
+      return undefined;
+    }
+    const createdAt = new Date(decoded[0]);
+    if (Number.isNaN(createdAt.getTime()) || !UUID_RE.test(decoded[1])) return undefined;
+    return { createdAt, id: decoded[1] };
+  } catch {
+    return undefined;
+  }
+}
+
+function decisionSummary(decision: FactoryDeferredDecisionRecord) {
+  const type = typeof decision.decision.type === 'string' ? decision.decision.type.slice(0, 64) : 'unknown';
+  return {
+    id: decision.id,
+    evaluationId: decision.evaluationId,
+    workItemId: decision.workItemId,
+    type,
+    status: decision.status,
+    attempts: decision.attempts,
+    lastError: decision.lastError?.slice(0, 512) ?? null,
+    createdAt: decision.createdAt.toISOString(),
+    updatedAt: decision.updatedAt.toISOString(),
+    completedAt: decision.completedAt?.toISOString() ?? null,
+  };
+}
+
 interface FactoryRoutesOptions {
   transitionService?: Pick<FactoryTransitionService, 'transition' | 'ruleSetVersion'>;
   startCoordinator?: Pick<FactoryStartCoordinator, 'prepare'>;
+  decisionStorage?: Pick<WorkItemsStorage, 'listDeferredDecisionPage' | 'retryDeferredDecision'>;
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -274,6 +340,55 @@ export function buildFactoryRoutes(storage?: GithubStorage, options: FactoryRout
         const days = clampMetricsWindow(loose(c).req.query('days'));
         const items = await listWorkItems(resolved.orgId, resolved.projectId);
         return c.json({ metrics: computeFactoryMetrics(items, { days, now: new Date() }) });
+      },
+    }),
+
+    // ── Bounded durable rule-decision status ────────────────────────────────
+    registerApiRoute('/web/factory/projects/:id/decisions', {
+      method: 'GET',
+      requiresAuth: false,
+      handler: async c => {
+        const context = loose(c);
+        const resolved = await resolveProject(context, storage);
+        if ('response' in resolved) return resolved.response;
+        if (!options.decisionStorage) return c.json({ error: 'factory_decisions_unavailable' }, 503);
+
+        const cursorRaw = context.req.query('before');
+        const before = parseDecisionCursor(cursorRaw);
+        if (cursorRaw && !before) return c.json({ error: 'invalid_cursor' }, 400);
+        const page = await options.decisionStorage.listDeferredDecisionPage({
+          orgId: resolved.orgId,
+          githubProjectId: resolved.projectId,
+          statuses: parseDecisionStatuses(context.req.query('statuses')),
+          before,
+          limit: parseDecisionLimit(context.req.query('limit')),
+        });
+        const last = page.decisions.at(-1);
+        return c.json({
+          decisions: page.decisions.map(decisionSummary),
+          ...(page.hasMore && last ? { nextCursor: encodeDecisionCursor(last) } : {}),
+        });
+      },
+    }),
+
+    registerApiRoute('/web/factory/projects/:id/decisions/:decisionId/retry', {
+      method: 'POST',
+      requiresAuth: false,
+      handler: async c => {
+        const context = loose(c);
+        const resolved = await resolveProject(context, storage);
+        if ('response' in resolved) return resolved.response;
+        if (!options.decisionStorage) return c.json({ error: 'factory_decisions_unavailable' }, 503);
+        const decisionId = context.req.param('decisionId');
+        if (!decisionId || !UUID_RE.test(decisionId)) return c.json({ error: 'invalid_decision_id' }, 422);
+        const decision = await options.decisionStorage.retryDeferredDecision(
+          resolved.orgId,
+          resolved.projectId,
+          decisionId,
+          new Date(),
+        );
+        if (!decision) return c.json({ error: 'decision_not_retryable' }, 409);
+        return c.json({ decision: decisionSummary(decision) });
       },
     }),
 

@@ -20,6 +20,8 @@ import type {
   CommitFactoryTransitionInput,
   CommitFactoryTransitionResult,
   CreateWorkItemInput,
+  FactoryDeferredDecisionPage,
+  FactoryDeferredDecisionPageInput,
   FactoryDeferredDecisionRecord,
   FactoryDispatchFailureInput,
   FactoryLeaseClaimInput,
@@ -332,6 +334,24 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       .map(decision => structuredClone(decision));
   }
 
+  async listDeferredDecisionPage(input: FactoryDeferredDecisionPageInput): Promise<FactoryDeferredDecisionPage> {
+    const rows = [...this.#decisions.values()]
+      .filter(decision => decision.orgId === input.orgId && decision.githubProjectId === input.githubProjectId)
+      .filter(decision => !input.statuses || input.statuses.includes(decision.status))
+      .filter(decision => {
+        if (!input.before) return true;
+        const created = decision.createdAt.getTime();
+        const before = input.before.createdAt.getTime();
+        return created < before || (created === before && decision.id < input.before.id);
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id))
+      .slice(0, input.limit + 1);
+    return {
+      decisions: rows.slice(0, input.limit).map(decision => structuredClone(decision)),
+      hasMore: rows.length > input.limit,
+    };
+  }
+
   async claimDeferredDecisions(input: FactoryLeaseClaimInput): Promise<FactoryDeferredDecisionRecord[]> {
     const eligible = [...this.#decisions.values()]
       .filter(
@@ -401,6 +421,29 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     };
     this.#decisions.set(`${decision.orgId}:${decision.githubProjectId}:${decision.idempotencyKey}`, failed);
     return structuredClone(failed);
+  }
+
+  async retryDeferredDecision(
+    orgId: string,
+    githubProjectId: string,
+    decisionId: string,
+    now: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null> {
+    const decision = [...this.#decisions.values()].find(
+      entry => entry.id === decisionId && entry.orgId === orgId && entry.githubProjectId === githubProjectId,
+    );
+    if (!decision || decision.status !== 'failed') return null;
+    const retrying: FactoryDeferredDecisionRecord = {
+      ...decision,
+      status: 'retry',
+      availableAt: now,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      completedAt: null,
+      updatedAt: now,
+    };
+    this.#decisions.set(`${decision.orgId}:${decision.githubProjectId}:${decision.idempotencyKey}`, retrying);
+    return structuredClone(retrying);
   }
 
   #ownsLease(

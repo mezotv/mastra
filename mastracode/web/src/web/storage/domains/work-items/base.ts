@@ -146,6 +146,19 @@ export interface FactoryRuleEvaluationRecord {
 
 export type FactoryDispatchStatus = 'pending' | 'leased' | 'retry' | 'succeeded' | 'failed';
 
+export interface FactoryDeferredDecisionPageInput {
+  orgId: string;
+  githubProjectId: string;
+  statuses?: FactoryDispatchStatus[];
+  before?: { createdAt: Date; id: string };
+  limit: number;
+}
+
+export interface FactoryDeferredDecisionPage {
+  decisions: FactoryDeferredDecisionRecord[];
+  hasMore: boolean;
+}
+
 export interface FactoryDeferredDecisionRecord {
   id: string;
   orgId: string;
@@ -461,6 +474,9 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   /** List durable deferred decisions for audit and recovery. */
   abstract listDeferredDecisions(orgId: string, githubProjectId: string): Promise<FactoryDeferredDecisionRecord[]>;
 
+  /** Read a bounded newest-first status page without exposing another tenant. */
+  abstract listDeferredDecisionPage(input: FactoryDeferredDecisionPageInput): Promise<FactoryDeferredDecisionPage>;
+
   /** Atomically claim currently available decisions. Expired leases are eligible for recovery. */
   abstract claimDeferredDecisions(input: FactoryLeaseClaimInput): Promise<FactoryDeferredDecisionRecord[]>;
 
@@ -475,6 +491,14 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   ): Promise<FactoryDeferredDecisionRecord | null>;
 
   abstract failDeferredDecision(input: FactoryDispatchFailureInput): Promise<FactoryDeferredDecisionRecord | null>;
+
+  /** Requeue the same idempotent terminal effect; non-failed decisions are never rerun. */
+  abstract retryDeferredDecision(
+    orgId: string,
+    githubProjectId: string,
+    decisionId: string,
+    now: Date,
+  ): Promise<FactoryDeferredDecisionRecord | null>;
 
   /** Resolve exact active agent authority; partial session matches never authorize. */
   abstract findActiveRunBinding(address: FactoryRunBindingAddress): Promise<FactoryRunBindingRecord | null>;
