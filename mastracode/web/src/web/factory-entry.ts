@@ -30,6 +30,9 @@ import { observeAgentGitAction } from './audit/agent-audit.js';
 import type { WebAuthAdapter } from './auth-adapter.js';
 import { buildAuthRoutes, createWebAuthGate } from './auth.js';
 import type { FactoryIntegration, IntegrationTools } from './factory-integration.js';
+import { builtInFactoryRules } from './factory/rules/defaults.js';
+import type { FactoryRules } from './factory/rules/types.js';
+import { assertFactoryRules } from './factory/rules/validation.js';
 import { getFactoryWorkspace } from './factory/workspace.js';
 import { parseCreatedPullRequest, subscribeCurrentSessionToPullRequest } from './github/session-subscriptions.js';
 import type { WorkspaceSandbox } from '@mastra/core/workspace';
@@ -125,6 +128,13 @@ export interface MastraFactoryConfig {
    * never mount, its tools never register, and the server boots fine.
    */
   integrations?: FactoryIntegration[];
+  /**
+   * Authoritative Factory board, tool-result, and GitHub-event rules. Construct
+   * with `defaultFactoryRules({ version, overrides })` so deployment policy has
+   * an explicit version and exact handler leaves replace rather than compose.
+   * Omitted → conservative built-in rules for the current deployment.
+   */
+  rules?: FactoryRules;
 }
 
 export interface MastraFactorySandboxConfig {
@@ -213,6 +223,9 @@ export class MastraFactory {
       integrationIds.add(integration.id);
     }
 
+    const rules = this.#config.rules ?? builtInFactoryRules();
+    assertFactoryRules(rules);
+
     // Registry of factory app-table storage domains. Built-ins register here;
     // integration-provided domains flow through the same register() path and
     // initialize with everything else in the single prepare() init below.
@@ -263,6 +276,7 @@ export class MastraFactory {
       vector,
       factoryStore,
       integrations,
+      rules,
       publicUrl: publicOrigin,
       authAdapter: auth,
       stateSigner,

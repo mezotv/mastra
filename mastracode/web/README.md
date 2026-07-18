@@ -61,6 +61,42 @@ pnpm web:ui:test  # UI MSW tests (e2e/web-ui)
 
 The private Web API can activate a user-invocable skill on an existing scoped AgentController session with `POST /web/agent-controller/:controllerId/skills/invoke`. The Web Factory packages workflow skills such as `understand-issue` and `understand-pr` as ordinary, read-only `SKILL.md` files and adds them only to workspaces created by `MastraFactory`; the shared SDK and TUI workspace resolver do not load them. The route resolves every ID through the session workspace, uses the same `<skill name="…">` activation envelope as `/skill/<name>` in the TUI, and returns an error without dispatching when the skill is missing. Authenticated requests may target only the caller's personal session or a Factory worktree owned by that organization user.
 
+## Factory rules
+
+`MastraFactory` accepts one authoritative `rules` tree for Work and Review stage entry and exit, completed tool results, and normalized GitHub events. Construct it with `defaultFactoryRules()` so every deployment policy has an explicit version:
+
+```ts
+import { MastraFactory } from './src/web/factory-entry.js';
+import { defaultFactoryRules } from './src/web/factory/rules/index.js';
+
+const rules = defaultFactoryRules({
+  version: '2026-07-18.1',
+  overrides: {
+    review: {
+      intake: {
+        pullRequest: {
+          onEnter: context =>
+            context.actor.type === 'github' && !context.actor.trusted
+              ? { type: 'reject', code: 'forbidden', reason: 'A trusted author is required.' }
+              : undefined,
+        },
+      },
+    },
+    tools: {
+      submit_plan: {
+        onResult: () => undefined,
+      },
+    },
+  },
+});
+
+const factory = new MastraFactory({ rules });
+```
+
+Overrides replace the exact `onEnter`, `onExit`, `onResult`, or `onEvent` leaf; they never compose implicitly with another handler. The version is configuration identity for persisted evaluations and audits, not an event-deduplication key, and Mastra never hashes function source.
+
+Rules are trusted deployment code. They receive normalized, bounded context rather than storage handles, credentials, worktree paths, or raw webhook payloads. Each handler returns one bounded `FactoryRuleDecision` or `void`: a typed rejection, transition, linked-item upsert, skill invocation, bound-session message, or notification. Every returned decision is validated and redacted before persistence; external effects are deferred rather than executed inside rule evaluation.
+
 ## GitHub pull request notifications
 
 GitHub project sessions automatically subscribe the current thread after a successful `gh pr create`. The `github_subscribe_pr` tool is primarily for existing pull requests or recovery when automatic subscription did not occur. Use `github_unsubscribe_pr` only to stop notifications early; closing or merging the pull request retires its subscription automatically.

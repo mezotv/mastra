@@ -5,12 +5,14 @@ import type { WorkspaceSandbox } from '@mastra/core/workspace';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { WebAuthAdapter, WebAuthAdapterInitContext } from './auth-adapter.js';
 import { MastraFactory } from './factory-entry.js';
+import { defaultFactoryRules, DEFAULT_FACTORY_RULE_VERSION } from './factory/rules/index.js';
 import { getFactoryWorkspace } from './factory/workspace.js';
 import type { FactoryIntegration, IntegrationContext } from './factory-integration.js';
 import {
   __resetRuntimeConfigForTests,
   getFactoryStore,
   getSeededAuthAdapter,
+  getSeededFactoryRules,
   getSeededIntegration,
   getSeededSandbox,
   getSeededStateSigner,
@@ -106,6 +108,28 @@ describe('MastraFactory.prepare', () => {
     expect(getSharedAppPool()).toBe(storage.pool);
     expect(getSeededAuthAdapter()).toBe(auth);
     expect(getSeededSandbox()?.machine).toBe(sandbox);
+  });
+
+  it('seeds conservative versioned Factory rules when the slot is omitted', async () => {
+    await prepareFactory({});
+    expect(getSeededFactoryRules()).toEqual({
+      version: DEFAULT_FACTORY_RULE_VERSION,
+      work: {},
+      review: {},
+      tools: {},
+      github: {},
+    });
+  });
+
+  it('seeds explicitly configured Factory rules without composing handler leaves', async () => {
+    const onResult = vi.fn(() => undefined);
+    const rules = defaultFactoryRules({
+      version: 'customer-policy-3',
+      overrides: { tools: { submit_plan: { onResult } } },
+    });
+    await prepareFactory({ rules });
+    expect(getSeededFactoryRules()).toBe(rules);
+    expect(getSeededFactoryRules()?.tools.submit_plan?.onResult).toBe(onResult);
   });
 
   it('runs the single init path: storage.init() then the factory domains', async () => {
