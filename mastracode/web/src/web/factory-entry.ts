@@ -32,6 +32,8 @@ import { buildAuthRoutes, createWebAuthGate } from './auth.js';
 import type { FactoryIntegration, IntegrationTools } from './factory-integration.js';
 import { builtInFactoryRules } from './factory/rules/defaults.js';
 import { FactoryDecisionDispatcher } from './factory/rules/dispatcher.js';
+import { createFactoryTransitionTools } from './factory/rules/tools.js';
+import { FactoryTransitionService } from './factory/rules/transition-service.js';
 import type { FactoryRules } from './factory/rules/types.js';
 import { assertFactoryRules } from './factory/rules/validation.js';
 import { getFactoryWorkspace } from './factory/workspace.js';
@@ -325,6 +327,10 @@ export class MastraFactory {
 
     // Factory work-item board — hangs off GitHub projects, same fail-soft pattern.
     const factoryReady = await resolveFactoryReady(githubReady);
+    const workItemsStorage = factoryStore?.isReady('work-items') ? factoryStore.workItems : undefined;
+    const transitionService = workItemsStorage
+      ? new FactoryTransitionService({ rules, storage: workItemsStorage })
+      : undefined;
 
     // Per-integration readiness. The built-ins keep their composite gates
     // (auth + app DB + signer stability); custom integrations are ready when
@@ -377,23 +383,29 @@ export class MastraFactory {
       disableGithubSignals: true,
       ...(storage ? { storage } : {}),
       ...(vector ? { vector } : {}),
-      ...(toolIntegrations.length > 0
+      ...(toolIntegrations.length > 0 || (workItemsStorage && transitionService)
         ? {
             extraTools: async ({ requestContext }: { requestContext: RequestContext }) => {
               const tools: IntegrationTools = {};
               const toolOwners = new Map<string, string>();
-              const mergeTools = (integration: FactoryIntegration, contributed: IntegrationTools) => {
+              const mergeTools = (ownerId: string, contributed: IntegrationTools) => {
                 for (const [name, tool] of Object.entries(contributed)) {
                   const owner = toolOwners.get(name);
                   if (owner) {
                     throw new Error(
-                      `MastraFactory: integration tool '${name}' from '${integration.id}' conflicts with '${owner}'.`,
+                      `MastraFactory: integration tool '${name}' from '${ownerId}' conflicts with '${owner}'.`,
                     );
                   }
-                  toolOwners.set(name, integration.id);
+                  toolOwners.set(name, ownerId);
                   tools[name] = tool;
                 }
               };
+              if (workItemsStorage && transitionService) {
+                mergeTools(
+                  'factory',
+                  await createFactoryTransitionTools({ requestContext, storage: workItemsStorage, transitionService }),
+                );
+              }
               for (const { integration, ready, ensureReady } of toolIntegrations) {
                 if (!ready && ensureReady) {
                   try {
@@ -403,10 +415,10 @@ export class MastraFactory {
                   }
                 }
                 if (integration.agentTools) {
-                  mergeTools(integration, await integration.agentTools({ requestContext }));
+                  mergeTools(integration.id, await integration.agentTools({ requestContext }));
                 }
                 if (integration.sessionTools) {
-                  mergeTools(integration, integration.sessionTools(requestContext));
+                  mergeTools(integration.id, integration.sessionTools(requestContext));
                 }
               }
               return tools;
@@ -455,10 +467,11 @@ export class MastraFactory {
           integrations: readyIntegrations,
           intakeReady,
           factoryReady,
-          onFactoryRuntime: ({ transitionService }) => {
+          factoryTransitionService: transitionService,
+          onFactoryRuntime: ({ transitionService: runtimeTransitionService }) => {
             this.#dispatcher ??= new FactoryDecisionDispatcher({
               controller,
-              transitionService,
+              transitionService: runtimeTransitionService,
               storage: getFactoryStore().workItems,
             });
           },

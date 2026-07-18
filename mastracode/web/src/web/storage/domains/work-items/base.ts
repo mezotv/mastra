@@ -139,6 +139,21 @@ export interface FactoryDeferredDecisionRecord {
   updatedAt: Date;
 }
 
+export interface FactoryRunBindingAddress {
+  orgId: string;
+  githubProjectId: string;
+  threadId: string;
+  resourceId: string;
+  projectPath: string;
+}
+
+export interface RevokeFactoryRunBindingInput {
+  orgId: string;
+  githubProjectId: string;
+  bindingId: string;
+  revokedAt: Date;
+}
+
 export interface FactoryRunBindingRecord {
   id: string;
   orgId: string;
@@ -416,6 +431,12 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   ): Promise<FactoryDeferredDecisionRecord | null>;
 
   abstract failDeferredDecision(input: FactoryDispatchFailureInput): Promise<FactoryDeferredDecisionRecord | null>;
+
+  /** Resolve exact active agent authority; partial session matches never authorize. */
+  abstract findActiveRunBinding(address: FactoryRunBindingAddress): Promise<FactoryRunBindingRecord | null>;
+
+  /** Revoke one exact tenant-scoped binding. */
+  abstract revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null>;
 
   /** List binding history, optionally narrowed to one work item. */
   abstract listRunBindings(

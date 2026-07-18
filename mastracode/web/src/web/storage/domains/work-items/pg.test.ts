@@ -310,6 +310,53 @@ describe('WorkItemsStoragePG', () => {
     expect(queries.map(sqlOf)).not.toContain('COMMIT');
   });
 
+  it('looks up and revokes bindings through the complete tenant-scoped authority tuple', async () => {
+    const now = new Date('2026-07-18T10:00:00Z');
+    const bindingRow = {
+      id: 'binding-1',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      work_item_id: 'wi-1',
+      role: 'work',
+      thread_id: 'thread-1',
+      resource_id: 'resource-1',
+      project_path: '/worktree',
+      branch: 'feature',
+      status: 'active',
+      created_at: now,
+      revoked_at: null,
+    };
+    const { queries, ctx } = fakePool(text => {
+      if (text.includes('SELECT * FROM factory_run_bindings') && text.includes('resource_id')) {
+        return { rows: [bindingRow] };
+      }
+      if (text.includes('UPDATE factory_run_bindings') && text.includes("status = 'revoked'")) {
+        return { rows: [{ ...bindingRow, status: 'revoked', revoked_at: now }] };
+      }
+      return undefined;
+    });
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    await expect(
+      domain.findActiveRunBinding({
+        orgId: 'org1',
+        githubProjectId: 'p1',
+        threadId: 'thread-1',
+        resourceId: 'resource-1',
+        projectPath: '/worktree',
+      }),
+    ).resolves.toMatchObject({ id: 'binding-1', status: 'active' });
+    await expect(
+      domain.revokeRunBinding({ orgId: 'org1', githubProjectId: 'p1', bindingId: 'binding-1', revokedAt: now }),
+    ).resolves.toMatchObject({ id: 'binding-1', status: 'revoked', revokedAt: now });
+
+    const lookup = queries.find(query => query.text.includes('SELECT * FROM factory_run_bindings'))!;
+    expect(lookup.values).toEqual(['org1', 'p1', 'thread-1', 'resource-1', '/worktree']);
+    const revoke = queries.find(query => query.text.includes('UPDATE factory_run_bindings'))!;
+    expect(revoke.values).toEqual(['binding-1', 'org1', 'p1', now]);
+  });
+
   it('prepares session, exact binding, and pending kickoff atomically before returning', async () => {
     const sessionRow = {
       ...dbRow,

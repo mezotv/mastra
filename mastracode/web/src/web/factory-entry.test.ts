@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalSandbox } from '@mastra/core/workspace';
 import type { WorkspaceSandbox } from '@mastra/core/workspace';
 import { PostgresStore, PgVector } from '@mastra/pg';
+import { RequestContext } from '@mastra/core/request-context';
 import type { WebAuthAdapter, WebAuthAdapterInitContext } from './auth-adapter.js';
 import { MastraFactory } from './factory-entry.js';
 import { defaultFactoryRules, DEFAULT_FACTORY_RULE_VERSION } from './factory/rules/index.js';
@@ -237,6 +238,42 @@ describe('MastraFactory.prepare', () => {
     const paths = buildApiRoutes({ controller: {}, authStorage: {} }).map(r => r.path);
     expect(paths).toContain('/auth/fake-login');
     expect(paths).toContain('/auth/me');
+  });
+
+  it('registers the Factory transition tool only for exact active bindings', async () => {
+    vi.spyOn(FactoryStore.prototype, 'isReady').mockImplementation(name => name === 'work-items');
+    const config = await prepareFactory({ storage: fakePgStorage() });
+    const workItems = getFactoryStore().workItems;
+    const binding = {
+      id: 'binding-1',
+      orgId: 'org-1',
+      githubProjectId: '11111111-2222-4333-8444-555555555555',
+      workItemId: 'item-1',
+      role: 'work',
+      threadId: 'thread-1',
+      resourceId: 'resource-1',
+      projectPath: '/worktree',
+      branch: 'factory/item',
+      status: 'active' as const,
+      createdAt: new Date(),
+      revokedAt: null,
+    };
+    const lookup = vi.spyOn(workItems, 'findActiveRunBinding').mockResolvedValue(binding);
+    const extraTools = config.extraTools as (args: {
+      requestContext: RequestContext;
+    }) => Promise<Record<string, unknown>>;
+    const requestContext = new RequestContext();
+    requestContext.set('user', { workosId: 'user-1', organizationId: 'org-1' });
+    requestContext.set('controller', {
+      resourceId: 'resource-1',
+      threadId: 'thread-1',
+      scope: '/worktree',
+      getState: () => ({ githubProjectId: binding.githubProjectId }),
+    });
+
+    await expect(extraTools({ requestContext })).resolves.toHaveProperty('factory_transition_work_item');
+    lookup.mockResolvedValue(null);
+    await expect(extraTools({ requestContext })).resolves.toEqual({});
   });
 
   it('omits auth routes when auth is not configured', async () => {

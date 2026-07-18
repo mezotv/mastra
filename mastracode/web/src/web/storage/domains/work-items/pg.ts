@@ -28,8 +28,10 @@ import type {
   FactoryLeaseClaimInput,
   FactoryLeaseIdentity,
   FactoryPendingStartRecord,
+  FactoryRunBindingAddress,
   FactoryRunBindingRecord,
   PrepareFactoryRunStartInput,
+  RevokeFactoryRunBindingInput,
   PrepareFactoryRunStartResult,
   UpdateWorkItemInput,
   UpsertWorkItemResult,
@@ -714,6 +716,28 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
       ],
     );
     return rows[0] ? toDeferredDecision(rows[0]) : null;
+  }
+
+  async findActiveRunBinding(address: FactoryRunBindingAddress): Promise<FactoryRunBindingRecord | null> {
+    const { rows } = await this.#db.query<RunBindingDbRow>(
+      `SELECT * FROM factory_run_bindings
+       WHERE org_id = $1 AND github_project_id = $2 AND thread_id = $3
+         AND resource_id = $4 AND project_path = $5 AND status = 'active'
+       LIMIT 1`,
+      [address.orgId, address.githubProjectId, address.threadId, address.resourceId, address.projectPath],
+    );
+    return rows[0] ? toBinding(rows[0]) : null;
+  }
+
+  async revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null> {
+    const { rows } = await this.#db.query<RunBindingDbRow>(
+      `UPDATE factory_run_bindings
+       SET status = 'revoked', revoked_at = $4
+       WHERE id = $1 AND org_id = $2 AND github_project_id = $3 AND status = 'active'
+       RETURNING *`,
+      [input.bindingId, input.orgId, input.githubProjectId, input.revokedAt],
+    );
+    return rows[0] ? toBinding(rows[0]) : null;
   }
 
   async listRunBindings(

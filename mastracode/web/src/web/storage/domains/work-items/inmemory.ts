@@ -25,8 +25,10 @@ import type {
   FactoryPendingStartRecord,
   FactoryRuleEvaluationRecord,
   FactoryRuleIngressRecord,
+  FactoryRunBindingAddress,
   FactoryRunBindingRecord,
   PrepareFactoryRunStartInput,
+  RevokeFactoryRunBindingInput,
   PrepareFactoryRunStartResult,
   UpdateWorkItemInput,
   UpsertWorkItemResult,
@@ -306,6 +308,34 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       record.status === 'leased' &&
       record.leaseOwner === identity.ownerId
     );
+  }
+
+  async findActiveRunBinding(address: FactoryRunBindingAddress): Promise<FactoryRunBindingRecord | null> {
+    const binding = [...this.#bindings.values()].find(
+      candidate =>
+        candidate.orgId === address.orgId &&
+        candidate.githubProjectId === address.githubProjectId &&
+        candidate.threadId === address.threadId &&
+        candidate.resourceId === address.resourceId &&
+        candidate.projectPath === address.projectPath &&
+        candidate.status === 'active',
+    );
+    return binding ? structuredClone(binding) : null;
+  }
+
+  async revokeRunBinding(input: RevokeFactoryRunBindingInput): Promise<FactoryRunBindingRecord | null> {
+    const binding = this.#bindings.get(input.bindingId);
+    if (
+      !binding ||
+      binding.orgId !== input.orgId ||
+      binding.githubProjectId !== input.githubProjectId ||
+      binding.status !== 'active'
+    ) {
+      return null;
+    }
+    const revoked = { ...binding, status: 'revoked' as const, revokedAt: input.revokedAt };
+    this.#bindings.set(binding.id, revoked);
+    return structuredClone(revoked);
   }
 
   async listRunBindings(
