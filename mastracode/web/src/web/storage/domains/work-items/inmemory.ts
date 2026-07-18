@@ -250,15 +250,6 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       };
     }
 
-    const conflictingThread = [...this.#bindings.values()].find(
-      binding =>
-        binding.orgId === input.orgId &&
-        binding.threadId === input.session.threadId &&
-        binding.status === 'active' &&
-        (binding.workItemId !== input.workItem.id || binding.role !== input.role),
-    );
-    if (conflictingThread) throw new Error('Factory thread already has an active binding.');
-
     let item: WorkItemRow;
     if (input.workItem.id) {
       const existing = this.#items.get(input.workItem.id);
@@ -267,15 +258,31 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
       }
       item = this.#applyPatch(existing, { sessions: { [input.role]: input.session } }, input.userId, new Date()).item;
     } else {
-      item = (
-        await this.upsert({
-          orgId: input.orgId,
-          userId: input.userId,
-          githubProjectId: input.githubProjectId,
-          input: { ...input.workItem.input, sessions: { [input.role]: input.session } },
-        })
-      ).item;
+      const resolved = await this.upsert({
+        orgId: input.orgId,
+        userId: input.userId,
+        githubProjectId: input.githubProjectId,
+        input: { ...input.workItem.input, sessions: { [input.role]: input.session } },
+        reuseMode: 'preserve',
+      });
+      item = resolved.created
+        ? resolved.item
+        : this.#applyPatch(
+            resolved.item,
+            { sessions: { [input.role]: input.session } },
+            input.userId,
+            new Date(),
+          ).item;
     }
+
+    const conflictingThread = [...this.#bindings.values()].find(
+      binding =>
+        binding.orgId === input.orgId &&
+        binding.threadId === input.session.threadId &&
+        binding.status === 'active' &&
+        (binding.workItemId !== item.id || binding.role !== input.role),
+    );
+    if (conflictingThread) throw new Error('Factory thread already has an active binding.');
 
     const now = new Date();
     for (const binding of this.#bindings.values()) {

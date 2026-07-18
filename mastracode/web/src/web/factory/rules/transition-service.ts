@@ -41,7 +41,6 @@ export interface FactoryTransitionRequest {
 export interface FactoryTransitionServiceOptions {
   rules?: FactoryRules;
   storage?: WorkItemsStorage;
-  timeoutMs?: number;
 }
 
 function rejection(
@@ -93,14 +92,12 @@ async function withRuleTimeout<T>(operation: Promise<T>, timeoutMs: number): Pro
 export class FactoryTransitionService {
   readonly #rules: FactoryRules;
   readonly #storage: WorkItemsStorage;
-  readonly #timeoutMs: number;
 
   constructor(options: FactoryTransitionServiceOptions = {}) {
     const rules = options.rules ?? getSeededFactoryRules();
     if (!rules) throw new Error('Factory rules are unavailable.');
     this.#rules = rules;
     this.#storage = options.storage ?? getFactoryStore().workItems;
-    this.#timeoutMs = options.timeoutMs ?? RULE_TIMEOUT_MS;
   }
 
   get ruleSetVersion(): string {
@@ -201,7 +198,7 @@ export class FactoryTransitionService {
             decisions: validateFactoryRuleDecisions(decisions) as unknown as Record<string, unknown>[],
           };
         })(),
-        this.#timeoutMs,
+        RULE_TIMEOUT_MS,
       );
     } catch (error) {
       const failed =

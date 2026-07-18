@@ -99,6 +99,34 @@ describe('WorkItemsStorageInMemory', () => {
     expect((await storage.get('org1', 'project1', item.id))?.stages).toEqual(['execute']);
   });
 
+  it('preserves canonical stage when start preparation reuses an existing source key', async () => {
+    const storage = new WorkItemsStorageInMemory();
+    const existing = (
+      await storage.upsert({
+        orgId: 'org1',
+        userId: 'user1',
+        githubProjectId: 'project1',
+        input: { ...input, stages: ['execute'] },
+      })
+    ).item;
+
+    const prepared = await storage.prepareRunStart({
+      orgId: 'org1',
+      userId: 'user1',
+      githubProjectId: 'project1',
+      workItem: { input: { ...input, stages: ['intake'] } },
+      role: 'work',
+      session: { projectPath: '/worktree', branch: 'feature', threadId: 'thread-1' },
+      resourceId: 'resource1',
+      kickoffKey: 'collision-start',
+      kickoffMessage: 'Start',
+    });
+
+    expect(prepared.item.id).toBe(existing.id);
+    expect(prepared.item.stages).toEqual(['execute']);
+    expect(prepared.item.sessions.work).toMatchObject({ threadId: 'thread-1' });
+  });
+
   it('atomically prepares exact role bindings and tenant-scoped pending starts', async () => {
     const storage = new WorkItemsStorageInMemory();
     const prepare = (kickoffKey: string, threadId: string, id?: string) =>
@@ -117,13 +145,15 @@ describe('WorkItemsStorageInMemory', () => {
     const first = await prepare('kickoff-1', 'thread-1');
     const replay = await prepare('kickoff-1', 'thread-ignored');
     const replacement = await prepare('kickoff-2', 'thread-2', first.item.id);
+    const sourceKeyRenewal = await prepare('kickoff-3', 'thread-2');
 
     expect(replay).toMatchObject({ replayed: true, binding: { id: first.binding.id } });
     expect(replacement.item.revision).toBe(2);
+    expect(sourceKeyRenewal).toMatchObject({ item: { id: first.item.id, revision: 3 }, replayed: false });
     expect(
       (await storage.listRunBindings('org1', 'project1', first.item.id)).map(binding => binding.status).sort(),
-    ).toEqual(['active', 'revoked']);
-    expect(await storage.listPendingStarts('org1', 'project1')).toHaveLength(2);
+    ).toEqual(['active', 'revoked', 'revoked']);
+    expect(await storage.listPendingStarts('org1', 'project1')).toHaveLength(3);
     expect(await storage.listPendingStarts('other-org', 'project1')).toEqual([]);
   });
 });

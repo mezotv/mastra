@@ -436,6 +436,15 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
   const absentStubs = ['github', 'linear']
     .filter(id => !registrations.some(({ integration }) => integration.id === id))
     .flatMap(disabledIntegrationStatusRoutes);
+  const factoryRoutes = (() => {
+    if (!deps.factoryReady) return [];
+    const workItems = getFactoryStore().workItems;
+    const transitionService = new FactoryTransitionService({ rules: getSeededFactoryRules(), storage: workItems });
+    return buildFactoryRoutes(githubStorage, {
+      transitionService,
+      startCoordinator: new FactoryStartCoordinator(deps.controller, workItems, transitionService),
+    });
+  })();
   return [
     ...buildFsRoutes({ root: deps.fsRoot }),
     ...buildConfigRoutes({ controller: deps.controller, authStorage: deps.authStorage }),
@@ -449,15 +458,7 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
     ...integrationRoutes,
     ...absentStubs,
     ...(deps.intakeReady ? buildIntakeRoutes() : []),
-    ...(deps.factoryReady
-      ? buildFactoryRoutes(githubStorage, {
-          transitionService: new FactoryTransitionService({
-            rules: getSeededFactoryRules(),
-            storage: getFactoryStore().workItems,
-          }),
-          startCoordinator: new FactoryStartCoordinator(deps.controller, getFactoryStore().workItems),
-        })
-      : []),
+    ...factoryRoutes,
     ...(deps.factoryReady ? buildAuditRoutes({ baseUrl: deps.publicOrigin, githubStorage }) : []),
   ];
 }

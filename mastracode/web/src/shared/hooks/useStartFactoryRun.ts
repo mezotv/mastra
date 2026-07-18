@@ -9,13 +9,11 @@ import { AGENT_CONTROLLER_ID } from '../../web/ui/domains/chat/services/constant
 import { useActiveProjectContext } from '../../web/ui/domains/workspaces/context/ActiveProjectProvider';
 import { deriveProjectPath, useCreateWorkspaceMutation } from './useWorkspaces';
 import type { Project } from '../../web/ui/domains/workspaces/services/projects';
-import { createWorkItem, startFactoryRun, transitionWorkItem } from '../../web/ui/domains/factory/services/workItems';
+import { startFactoryRun } from '../../web/ui/domains/factory/services/workItems';
 import type { WorkItemSource } from '../../web/ui/domains/factory/services/workItems';
 
 export interface StartFactoryRunWorkItem {
   id?: string;
-  revision?: number;
-  currentStage?: string;
   role: string;
   /** Retained for call-site compatibility; exact role authority no longer repoints other roles. */
   existingRoles?: string[];
@@ -108,30 +106,6 @@ export function useStartFactoryRun() {
 
       const desiredStage = workItem.stages.length === 1 ? workItem.stages[0] : undefined;
       if (!desiredStage) throw new Error('Factory runs require one exclusive destination stage');
-      let canonical = workItem.id
-        ? { id: workItem.id, revision: workItem.revision }
-        : await createWorkItem(baseUrl, githubProjectId, {
-            source: workItem.source,
-            sourceKey: workItem.sourceKey,
-            parentWorkItemId: workItem.parentWorkItemId,
-            title: workItem.title,
-            url: workItem.url ?? null,
-            stages: ['intake'],
-            metadata: workItem.metadata,
-          });
-      if (canonical.revision === undefined) throw new Error('Factory work item revision is unavailable');
-      const currentStage = workItem.id ? workItem.currentStage : 'intake';
-      if (desiredStage !== currentStage) {
-        const moved = await transitionWorkItem(baseUrl, githubProjectId, canonical.id, {
-          board: workItem.source === 'github-pr' ? 'review' : 'work',
-          stage: desiredStage as 'triage' | 'planning' | 'execute' | 'review' | 'done',
-          expectedRevision: canonical.revision,
-          requestId: crypto.randomUUID(),
-          cause: 'run_start',
-        });
-        if (moved.status === 'rejected') throw new Error(moved.reason);
-        canonical = { id: canonical.id, revision: moved.revision };
-      }
 
       const prepared = await startFactoryRun(baseUrl, githubProjectId, {
         resourceId,
@@ -141,8 +115,9 @@ export function useStartFactoryRun() {
         threadTags,
         kickoffKey: crypto.randomUUID(),
         kickoffMessage,
+        destinationStage: desiredStage as 'intake' | 'triage' | 'planning' | 'execute' | 'review' | 'done',
         workItem: {
-          id: canonical.id,
+          id: workItem.id,
           role: workItem.role,
           input: {
             source: workItem.source,
@@ -150,7 +125,7 @@ export function useStartFactoryRun() {
             parentWorkItemId: workItem.parentWorkItemId,
             title: workItem.title,
             url: workItem.url ?? null,
-            stages: workItem.stages,
+            stages: ['intake'],
             metadata: workItem.metadata,
           },
         },
