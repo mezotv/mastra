@@ -13,7 +13,12 @@
 import { getFactoryStore } from '../runtime-config';
 import { WorkItemRelationError } from '../storage/domains/work-items/base';
 import type {
+  CommitFactoryTransitionInput,
+  CommitFactoryTransitionResult,
   CreateWorkItemInput,
+  FactoryPendingStartRecord,
+  PrepareFactoryRunStartInput,
+  PrepareFactoryRunStartResult,
   UpdateWorkItemInput,
   UpsertWorkItemResult,
   WorkItemPriorState,
@@ -211,6 +216,7 @@ export async function upsertWorkItem(params: {
   userId: string;
   githubProjectId: string;
   input: CreateWorkItemInput;
+  reuseMode?: 'update' | 'preserve' | 'non-stage';
 }): Promise<UpsertWorkItemResult> {
   return (await workItemsDomain()).upsert(params);
 }
@@ -228,6 +234,30 @@ export async function updateWorkItem(
   patch: UpdateWorkItemInput,
 ): Promise<{ item: WorkItemRow; previous: WorkItemPriorState } | null> {
   return (await workItemsDomain()).update(orgId, id, userId, patch);
+}
+
+export async function getWorkItem(orgId: string, githubProjectId: string, id: string): Promise<WorkItemRow | null> {
+  return (await workItemsDomain()).get(orgId, githubProjectId, id);
+}
+
+export async function commitFactoryTransition(
+  input: CommitFactoryTransitionInput,
+): Promise<CommitFactoryTransitionResult> {
+  return (await workItemsDomain()).commitTransition(input);
+}
+
+export async function prepareFactoryRunStart(
+  input: PrepareFactoryRunStartInput,
+): Promise<PrepareFactoryRunStartResult> {
+  return (await workItemsDomain()).prepareRunStart(input);
+}
+
+export async function markFactoryPendingStart(
+  bindingId: string,
+  status: 'sent' | 'failed',
+  lastError?: string,
+): Promise<FactoryPendingStartRecord | null> {
+  return (await workItemsDomain()).markPendingStart(bindingId, status, lastError);
 }
 
 /** Delete an org's work item. Returns the row actually deleted, or `null` when it doesn't exist in the org. */

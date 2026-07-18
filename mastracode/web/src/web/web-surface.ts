@@ -21,9 +21,11 @@ import { buildFsRoutes } from './fs-routes.js';
 import { buildOAuthRoutes } from './oauth-routes.js';
 import { getGithubFeatureDiagnostics, isGithubFeatureEnabled } from './github/config.js';
 import { buildFactoryRoutes } from './factory/routes.js';
+import { FactoryStartCoordinator } from './factory/rules/start-coordinator.js';
+import { FactoryTransitionService } from './factory/rules/transition-service.js';
 import type { GithubStorage } from './github/storage/base.js';
 import { buildIntakeRoutes } from './intake/routes.js';
-import { getFactoryStore, getSeededStateSigner } from './runtime-config.js';
+import { getFactoryStore, getSeededFactoryRules, getSeededStateSigner } from './runtime-config.js';
 import { getLinearFeatureDiagnostics, isLinearFeatureEnabled } from './linear/config.js';
 import { registerSandboxReattach } from './sandbox-reattach-registration.js';
 import { buildSkillRoutes } from './skills/routes.js';
@@ -447,7 +449,15 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
     ...integrationRoutes,
     ...absentStubs,
     ...(deps.intakeReady ? buildIntakeRoutes() : []),
-    ...(deps.factoryReady ? buildFactoryRoutes(githubStorage) : []),
+    ...(deps.factoryReady
+      ? buildFactoryRoutes(githubStorage, {
+          transitionService: new FactoryTransitionService({
+            rules: getSeededFactoryRules(),
+            storage: getFactoryStore().workItems,
+          }),
+          startCoordinator: new FactoryStartCoordinator(deps.controller, getFactoryStore().workItems),
+        })
+      : []),
     ...(deps.factoryReady ? buildAuditRoutes({ baseUrl: deps.publicOrigin, githubStorage }) : []),
   ];
 }

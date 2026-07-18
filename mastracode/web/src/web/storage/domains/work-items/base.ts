@@ -5,8 +5,8 @@
  * One `work_items` row represents a unit of work (a GitHub issue/PR, a Linear
  * issue, or a manually filed card) as it moves across board stages. Stages are
  * plain strings inside jsonb (`intake` → `execute` → `review` → `done` today),
- * so evolving the board's columns never needs a schema change. A single item
- * can sit in several stages at once (e.g. `['execute','review']`).
+ * so evolving the board's columns never needs a schema change. The authoritative
+ * Factory transition path keeps one exclusive current stage per item.
  *
  * Tenancy is **org-first**, like `github_projects`: the board is shared by the
  * whole org, scoped to one project. `created_by` and the per-entry `by` /
@@ -69,8 +69,111 @@ export interface WorkItemRow {
   sessions: Record<string, WorkItemSessionRef>;
   /** Flexible source payload (issue number, labels, headBranch, ...). */
   metadata: Record<string, unknown>;
+  /** Monotonic version used by authoritative compare-and-set transitions. */
+  revision: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface FactoryRuleIngressRecord {
+  id: string;
+  orgId: string;
+  githubProjectId: string;
+  identity: string;
+  triggerType: string;
+  transitionId: string;
+  result: Record<string, unknown>;
+  createdAt: Date;
+}
+
+export interface FactoryRuleEvaluationRecord {
+  id: string;
+  ingressId: string;
+  workItemId: string;
+  ruleSetVersion: string;
+  expectedRevision: number;
+  outcome: 'accepted' | 'rejected';
+  code: string | null;
+  reason: string | null;
+  createdAt: Date;
+}
+
+export interface FactoryDeferredDecisionRecord {
+  id: string;
+  orgId: string;
+  githubProjectId: string;
+  evaluationId: string;
+  workItemId: string;
+  idempotencyKey: string;
+  decision: Record<string, unknown>;
+  status: 'pending';
+  createdAt: Date;
+}
+
+export interface FactoryRunBindingRecord {
+  id: string;
+  orgId: string;
+  githubProjectId: string;
+  workItemId: string;
+  role: string;
+  threadId: string;
+  resourceId: string;
+  projectPath: string;
+  branch: string;
+  status: 'active' | 'revoked';
+  createdAt: Date;
+  revokedAt: Date | null;
+}
+
+export interface FactoryPendingStartRecord {
+  id: string;
+  orgId: string;
+  githubProjectId: string;
+  bindingId: string;
+  kickoffKey: string;
+  message: string | null;
+  status: 'pending' | 'sent' | 'failed';
+  lastError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CommitFactoryTransitionInput {
+  orgId: string;
+  githubProjectId: string;
+  workItemId: string;
+  expectedRevision: number;
+  destinationStage: string;
+  actorId: string;
+  ingress: { identity: string; triggerType: string; transitionId: string };
+  ruleSetVersion: string;
+  evaluation:
+    | { outcome: 'accepted'; decisions: Record<string, unknown>[] }
+    | { outcome: 'rejected'; code: string; reason: string };
+}
+
+export type CommitFactoryTransitionResult =
+  | { status: 'committed'; item: WorkItemRow | null; result: Record<string, unknown> }
+  | { status: 'replayed'; item: WorkItemRow | null; result: Record<string, unknown> }
+  | { status: 'missing' };
+
+export interface PrepareFactoryRunStartInput {
+  orgId: string;
+  userId: string;
+  githubProjectId: string;
+  workItem: { id?: string; input: CreateWorkItemInput };
+  role: string;
+  session: WorkItemSessionInput;
+  resourceId: string;
+  kickoffKey: string;
+  kickoffMessage: string | null;
+}
+
+export interface PrepareFactoryRunStartResult {
+  item: WorkItemRow;
+  binding: FactoryRunBindingRecord;
+  pendingStart: FactoryPendingStartRecord;
+  replayed: boolean;
 }
 
 /** Session ref as accepted from clients — `startedBy` is stamped server-side. */
@@ -198,7 +301,7 @@ export function computeWorkItemPatch(
     stages: [...existing.stages],
     sessionRoles: Object.keys(existing.sessions),
   };
-  const changes: Partial<WorkItemRow> = { updatedAt: now };
+  const changes: Partial<WorkItemRow> = { revision: existing.revision + 1, updatedAt: now };
   if (patch.parentWorkItemId !== undefined) changes.parentWorkItemId = patch.parentWorkItemId;
   if (patch.title !== undefined) changes.title = patch.title;
   if (patch.url !== undefined) changes.url = patch.url;
@@ -227,6 +330,42 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
   /** List the org's work items for a project, newest first. */
   abstract list(orgId: string, githubProjectId: string): Promise<WorkItemRow[]>;
 
+  /** Read one canonical item in the caller's tenant. */
+  abstract get(orgId: string, githubProjectId: string, id: string): Promise<WorkItemRow | null>;
+
+  /** Read a previously committed immutable ingress result without re-evaluating rules. */
+  abstract getTransitionResultByIngress(
+    orgId: string,
+    githubProjectId: string,
+    identity: string,
+  ): Promise<Record<string, unknown> | null>;
+
+  /** Atomically dedupe ingress, compare-and-set the item, and persist evaluation/outbox state. */
+  abstract commitTransition(input: CommitFactoryTransitionInput): Promise<CommitFactoryTransitionResult>;
+
+  /** List durable deferred decisions for dispatch and recovery. */
+  abstract listDeferredDecisions(orgId: string, githubProjectId: string): Promise<FactoryDeferredDecisionRecord[]>;
+
+  /** List binding history, optionally narrowed to one work item. */
+  abstract listRunBindings(
+    orgId: string,
+    githubProjectId: string,
+    workItemId?: string,
+  ): Promise<FactoryRunBindingRecord[]>;
+
+  /** List recoverable kickoff records for this tenant and project. */
+  abstract listPendingStarts(orgId: string, githubProjectId: string): Promise<FactoryPendingStartRecord[]>;
+
+  /** Atomically attach a session, activate its exact binding, and create recoverable kickoff state. */
+  abstract prepareRunStart(input: PrepareFactoryRunStartInput): Promise<PrepareFactoryRunStartResult>;
+
+  /** Mark a prepared kickoff after post-commit delivery succeeds or fails. */
+  abstract markPendingStart(
+    bindingId: string,
+    status: 'sent' | 'failed',
+    lastError?: string,
+  ): Promise<FactoryPendingStartRecord | null>;
+
   /**
    * Create a work item, reusing the existing record when `sourceKey` already
    * has one for the project (acting twice on the same issue must not duplicate
@@ -240,6 +379,7 @@ export abstract class WorkItemsStorage implements FactoryStorageDomain {
     userId: string;
     githubProjectId: string;
     input: CreateWorkItemInput;
+    reuseMode?: 'update' | 'preserve' | 'non-stage';
   }): Promise<UpsertWorkItemResult>;
 
   /**

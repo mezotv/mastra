@@ -39,6 +39,7 @@ describe('WorkItemsStoragePG', () => {
     stage_history: [{ stage: 'intake', enteredAt: '2026-07-01T10:00:00.000Z', by: 'u1' }],
     sessions: {},
     metadata: {},
+    revision: 1,
     created_at: new Date('2026-07-01T10:00:00Z'),
     updated_at: new Date('2026-07-01T10:00:00Z'),
   };
@@ -161,6 +162,169 @@ describe('WorkItemsStoragePG', () => {
     expect(texts[5]).toBe('COMMIT');
     expect(queries.find(query => query.text.startsWith('DELETE'))!.values).toEqual(['wi-9', 'org1']);
   });
+
+  it('declares tenant-scoped ingress, deferred decisions, bindings, and pending starts', () => {
+    expect(WORK_ITEMS_DDL).toContain('UNIQUE (org_id, github_project_id, identity)');
+    expect(WORK_ITEMS_DDL).toContain('factory_deferred_decisions_tenant_key_unique');
+    expect(WORK_ITEMS_DDL).toContain('factory_run_bindings_active_role_unique');
+    expect(WORK_ITEMS_DDL).toContain('factory_run_bindings_active_thread_unique');
+    expect(WORK_ITEMS_DDL).toContain('factory_pending_starts_tenant_kickoff_unique');
+  });
+
+  it('commits CAS movement, ingress, evaluation, and deferred decisions in one transaction', async () => {
+    const movedRow = {
+      ...dbRow,
+      stages: ['execute'],
+      revision: 2,
+      stage_history: [
+        { ...dbRow.stage_history[0], exitedAt: '2026-07-02T00:00:00.000Z' },
+        { stage: 'execute', enteredAt: '2026-07-02T00:00:00.000Z', by: 'u1' },
+      ],
+    };
+    const { queries, ctx } = fakePool(text => {
+      if (text.includes('FROM factory_rule_ingress')) return { rows: [] };
+      if (text.includes('FROM work_items') && text.includes('FOR UPDATE')) return { rows: [dbRow] };
+      if (text.includes('UPDATE work_items') && text.includes('revision = revision + 1')) return { rows: [movedRow] };
+      if (text.includes('INSERT INTO factory_rule_ingress')) return { rows: [{ id: 'ingress-1' }] };
+      if (text.includes('INSERT INTO factory_rule_evaluations')) return { rows: [{ id: 'evaluation-1' }] };
+      return undefined;
+    });
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    const result = await domain.commitTransition({
+      orgId: 'org1',
+      githubProjectId: 'p1',
+      workItemId: 'wi-1',
+      expectedRevision: 1,
+      destinationStage: 'execute',
+      actorId: 'u1',
+      ingress: { identity: 'request-1', triggerType: 'human', transitionId: '00000000-0000-4000-8000-000000000099' },
+      ruleSetVersion: 'rules-v1',
+      evaluation: {
+        outcome: 'accepted',
+        decisions: [{ type: 'notify', idempotencyKey: 'notify-1', title: 'Moved' }],
+      },
+    });
+
+    expect(result.status).toBe('committed');
+    if (result.status !== 'committed') throw new Error('transition did not commit');
+    expect(result.result).toMatchObject({ status: 'accepted', revision: 2, stage: 'execute' });
+    const sql = queries.map(sqlOf);
+    expect(sql).toContain('BEGIN');
+    expect(sql).toContain('COMMIT');
+    expect(sql.some(text => text.includes('INSERT INTO factory_rule_ingress'))).toBe(true);
+    expect(sql.some(text => text.includes('INSERT INTO factory_rule_evaluations'))).toBe(true);
+    const deferred = queries.find(query => query.text.includes('INSERT INTO factory_deferred_decisions'));
+    expect(deferred?.values?.slice(0, 2)).toEqual(['org1', 'p1']);
+  });
+
+  it('rolls back the authoritative transition when deferred decision persistence fails', async () => {
+    const movedRow = { ...dbRow, stages: ['execute'], revision: 2 };
+    const { queries, ctx } = fakePool(text => {
+      if (text.includes('FROM factory_rule_ingress')) return { rows: [] };
+      if (text.includes('FROM work_items') && text.includes('FOR UPDATE')) return { rows: [dbRow] };
+      if (text.includes('UPDATE work_items') && text.includes('revision = revision + 1')) return { rows: [movedRow] };
+      if (text.includes('INSERT INTO factory_rule_ingress')) return { rows: [{ id: 'ingress-1' }] };
+      if (text.includes('INSERT INTO factory_rule_evaluations')) return { rows: [{ id: 'evaluation-1' }] };
+      if (text.includes('INSERT INTO factory_deferred_decisions')) throw new Error('outbox unavailable');
+      return undefined;
+    });
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    await expect(
+      domain.commitTransition({
+        orgId: 'org1',
+        githubProjectId: 'p1',
+        workItemId: 'wi-1',
+        expectedRevision: 1,
+        destinationStage: 'execute',
+        actorId: 'u1',
+        ingress: { identity: 'request-rollback', triggerType: 'human', transitionId: 'transition-rollback' },
+        ruleSetVersion: 'rules-v1',
+        evaluation: {
+          outcome: 'accepted',
+          decisions: [{ type: 'notify', idempotencyKey: 'notify-rollback', title: 'Moved' }],
+        },
+      }),
+    ).rejects.toThrow('outbox unavailable');
+    expect(queries.map(sqlOf)).toContain('ROLLBACK');
+    expect(queries.map(sqlOf)).not.toContain('COMMIT');
+  });
+
+  it('prepares session, exact binding, and pending kickoff atomically before returning', async () => {
+    const sessionRow = {
+      ...dbRow,
+      revision: 2,
+      sessions: {
+        work: { projectPath: '/worktree', branch: 'feature', threadId: 'thread-1', startedBy: 'u1' },
+      },
+    };
+    const bindingRow = {
+      id: 'binding-1',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      work_item_id: 'wi-1',
+      role: 'work',
+      thread_id: 'thread-1',
+      resource_id: 'resource-1',
+      project_path: '/worktree',
+      branch: 'feature',
+      status: 'active',
+      created_at: new Date(),
+      revoked_at: null,
+    };
+    const pendingRow = {
+      id: 'pending-1',
+      org_id: 'org1',
+      github_project_id: 'p1',
+      binding_id: 'binding-1',
+      kickoff_key: 'kickoff-1',
+      message: 'Start',
+      status: 'pending',
+      last_error: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
+    const { queries, ctx } = fakePool(text => {
+      if (text.includes('FROM factory_pending_starts')) return { rows: [] };
+      if (text.includes('FROM work_items') && text.includes('FOR UPDATE')) return { rows: [dbRow] };
+      if (text.includes('UPDATE work_items SET sessions')) return { rows: [sessionRow] };
+      if (text.includes('INSERT INTO factory_run_bindings')) return { rows: [bindingRow] };
+      if (text.includes('INSERT INTO factory_pending_starts')) return { rows: [pendingRow] };
+      return undefined;
+    });
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    const result = await domain.prepareRunStart({
+      orgId: 'org1',
+      userId: 'u1',
+      githubProjectId: 'p1',
+      workItem: { id: 'wi-1', input: createInput },
+      role: 'work',
+      session: { projectPath: '/worktree', branch: 'feature', threadId: 'thread-1' },
+      resourceId: 'resource-1',
+      kickoffKey: 'kickoff-1',
+      kickoffMessage: 'Start',
+    });
+
+    expect(result).toMatchObject({
+      replayed: false,
+      item: { revision: 2 },
+      binding: { id: 'binding-1', status: 'active' },
+      pendingStart: { id: 'pending-1', status: 'pending' },
+    });
+    const sql = queries.map(sqlOf);
+    expect(sql.at(-1)).toBe('COMMIT');
+    expect(sql.findIndex(text => text.includes('UPDATE work_items SET sessions'))).toBeLessThan(
+      sql.findIndex(text => text.includes('INSERT INTO factory_run_bindings')),
+    );
+    expect(sql.findIndex(text => text.includes('INSERT INTO factory_run_bindings'))).toBeLessThan(
+      sql.findIndex(text => text.includes('INSERT INTO factory_pending_starts')),
+    );
+  });
 });
 
 const ITEM_ID = '00000000-0000-4000-8000-000000000001';
@@ -181,6 +345,7 @@ function dbRow(id: string, parentWorkItemId: string | null = null) {
     stage_history: [],
     sessions: {},
     metadata: {},
+    revision: 1,
     created_at: new Date('2026-01-01T00:00:00Z'),
     updated_at: new Date('2026-01-01T00:00:00Z'),
   };
