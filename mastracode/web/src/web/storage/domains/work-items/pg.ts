@@ -894,14 +894,18 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
   }
 
   async findRunBindingBySession(address: FactoryRunBindingSessionAddress): Promise<FactoryRunBindingRecord | null> {
-    const { rows } = await this.#db.query<RunBindingDbRow>(
-      `SELECT * FROM factory_run_bindings
-       WHERE github_project_id = $1 AND thread_id = $2 AND resource_id = $3 AND project_path = $4
+    const { rows } = await this.#db.query<RunBindingDbRow & { org_count: string | number }>(
+      `WITH matches AS (
+         SELECT * FROM factory_run_bindings
+         WHERE github_project_id = $1 AND thread_id = $2 AND resource_id = $3 AND project_path = $4
+       )
+       SELECT matches.*, (SELECT COUNT(DISTINCT org_id) FROM matches) AS org_count
+       FROM matches
        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
-       LIMIT 2`,
+       LIMIT 1`,
       [address.githubProjectId, address.threadId, address.resourceId, address.projectPath],
     );
-    if (!rows[0] || (rows[1] && rows[1].org_id !== rows[0].org_id)) return null;
+    if (!rows[0] || Number(rows[0].org_count) !== 1) return null;
     return toBinding(rows[0]);
   }
 

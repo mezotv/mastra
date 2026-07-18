@@ -327,6 +327,9 @@ describe('WorkItemsStoragePG', () => {
       revoked_at: null,
     };
     const { queries, ctx } = fakePool(text => {
+      if (text.includes('WITH matches AS') && text.includes('COUNT(DISTINCT org_id)')) {
+        return { rows: [{ ...bindingRow, org_count: '1' }] };
+      }
       if (text.includes('SELECT * FROM factory_run_bindings') && text.includes('resource_id')) {
         return { rows: [bindingRow] };
       }
@@ -366,6 +369,47 @@ describe('WorkItemsStoragePG', () => {
     expect(lookups[1]?.text).not.toContain('updated_at');
     const revoke = queries.find(query => query.text.includes('UPDATE factory_run_bindings'))!;
     expect(revoke.values).toEqual(['binding-1', 'org1', 'p1', now]);
+  });
+
+  it('rejects exact-session lookup when any matching binding belongs to another organization', async () => {
+    const now = new Date('2026-07-18T10:00:00Z');
+    const { queries, ctx } = fakePool(text => {
+      if (!text.includes('WITH matches AS')) return undefined;
+      return {
+        rows: [
+          {
+            id: 'binding-newest',
+            org_id: 'org-a',
+            github_project_id: 'p1',
+            work_item_id: 'wi-1',
+            role: 'work',
+            thread_id: 'thread-1',
+            resource_id: 'resource-1',
+            project_path: '/worktree',
+            branch: 'feature',
+            status: 'active',
+            created_at: now,
+            revoked_at: null,
+            org_count: '2',
+          },
+        ],
+      };
+    });
+    const domain = new WorkItemsStoragePG();
+    await domain.init(ctx);
+
+    await expect(
+      domain.findRunBindingBySession({
+        githubProjectId: 'p1',
+        threadId: 'thread-1',
+        resourceId: 'resource-1',
+        projectPath: '/worktree',
+      }),
+    ).resolves.toBeNull();
+
+    const lookup = queries.find(query => query.text.includes('WITH matches AS'))!;
+    expect(lookup.text).toContain('COUNT(DISTINCT org_id)');
+    expect(lookup.text).toContain('LIMIT 1');
   });
 
   it('prepares session, exact binding, and pending kickoff atomically before returning', async () => {
