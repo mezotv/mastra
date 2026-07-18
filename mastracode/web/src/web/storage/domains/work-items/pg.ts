@@ -311,10 +311,25 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
   }
 
   async delete(orgId: string, id: string): Promise<WorkItemRow | null> {
-    const { rows } = await this.#db.query<WorkItemDbRow>(
-      'DELETE FROM work_items WHERE id = $1 AND org_id = $2 RETURNING *',
-      [id, orgId],
-    );
-    return rows[0] ? toRow(rows[0]) : null;
+    return this.#withTx(async client => {
+      const candidate = await client.query<WorkItemDbRow>('SELECT * FROM work_items WHERE id = $1 AND org_id = $2', [
+        id,
+        orgId,
+      ]);
+      if (!candidate.rows[0]) return null;
+
+      await this.#lockProjectRelations(client, candidate.rows[0].org_id, candidate.rows[0].github_project_id);
+      const locked = await client.query<WorkItemDbRow>(
+        'SELECT * FROM work_items WHERE id = $1 AND org_id = $2 FOR UPDATE',
+        [id, orgId],
+      );
+      if (!locked.rows[0]) return null;
+
+      const { rows } = await client.query<WorkItemDbRow>(
+        'DELETE FROM work_items WHERE id = $1 AND org_id = $2 RETURNING *',
+        [id, orgId],
+      );
+      return rows[0] ? toRow(rows[0]) : null;
+    });
   }
 }

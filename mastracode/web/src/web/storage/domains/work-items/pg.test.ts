@@ -141,12 +141,25 @@ describe('WorkItemsStoragePG', () => {
     expect(lockQueries[0]!.values).toEqual(['org1', 'p1', 'github-issue:42']);
   });
 
-  it('deletes scoped to the org and returns null on a miss', async () => {
-    const { queries, ctx } = fakePool(text => (text.startsWith('DELETE') ? { rows: [] } : undefined));
+  it('deletes transactionally after taking the project relation lock', async () => {
+    const { queries, ctx } = fakePool(text => {
+      if (text === 'SELECT * FROM work_items WHERE id = $1 AND org_id = $2') return { rows: [dbRow] };
+      if (text.endsWith('FOR UPDATE')) return { rows: [dbRow] };
+      if (text.startsWith('DELETE')) return { rows: [] };
+      return undefined;
+    });
     const domain = new WorkItemsStoragePG();
     await domain.init(ctx);
+
     expect(await domain.delete('org1', 'wi-9')).toBeNull();
-    expect(queries.at(-1)!.values).toEqual(['wi-9', 'org1']);
+    const texts = queries.slice(1).map(sqlOf);
+    expect(texts[0]).toBe('BEGIN');
+    expect(texts[1]).toBe('SELECT * FROM work_items WHERE id = $1 AND org_id = $2');
+    expect(texts[2]).toContain('pg_advisory_xact_lock');
+    expect(texts[3]).toContain('FOR UPDATE');
+    expect(texts[4]).toContain('DELETE FROM work_items');
+    expect(texts[5]).toBe('COMMIT');
+    expect(queries.find(query => query.text.startsWith('DELETE'))!.values).toEqual(['wi-9', 'org1']);
   });
 });
 
@@ -210,5 +223,81 @@ describe('WorkItemsStoragePG relations', () => {
     const rowLockIndex = queries.findIndex(sql => sql === 'SELECT * FROM work_items WHERE id = $1 FOR UPDATE');
     expect(advisoryIndex).toBeGreaterThan(-1);
     expect(rowLockIndex).toBeGreaterThan(advisoryIndex);
+  });
+
+  it('serializes a parent update racing with deletion on the shared project lock', async () => {
+    const item = dbRow(ITEM_ID);
+    const parent = dbRow(PARENT_ID);
+    let connectionCount = 0;
+    let lockOwner: number | undefined;
+    const lockWaiters: Array<() => void> = [];
+    let releaseDeleteRowLock!: () => void;
+    const deleteRowLock = new Promise<void>(resolve => {
+      releaseDeleteRowLock = resolve;
+    });
+    let deleteHasProjectLock!: () => void;
+    const deleteProjectLock = new Promise<void>(resolve => {
+      deleteHasProjectLock = resolve;
+    });
+    let updateWaitsForProjectLock!: () => void;
+    const updateWaiting = new Promise<void>(resolve => {
+      updateWaitsForProjectLock = resolve;
+    });
+
+    const pool = {
+      query: vi.fn(async () => ({ rows: [] })),
+      connect: vi.fn(async () => {
+        const connectionId = ++connectionCount;
+        return {
+          query: vi.fn(async (sql: string) => {
+            if (sql.startsWith('SELECT pg_advisory_xact_lock')) {
+              if (lockOwner === undefined) {
+                lockOwner = connectionId;
+                if (connectionId === 1) deleteHasProjectLock();
+              } else {
+                updateWaitsForProjectLock();
+                await new Promise<void>(resolve => lockWaiters.push(resolve));
+                lockOwner = connectionId;
+              }
+              return { rows: [] };
+            }
+            if (connectionId === 1 && sql.endsWith('FOR UPDATE')) {
+              await deleteRowLock;
+              return { rows: [item] };
+            }
+            if (sql.startsWith('SELECT * FROM work_items WHERE id = $1 AND org_id = $2')) {
+              return { rows: [item] };
+            }
+            if (sql === 'SELECT * FROM work_items WHERE id = $1 FOR UPDATE') return { rows: [item] };
+            if (sql.startsWith('SELECT * FROM work_items WHERE org_id = $1')) return { rows: [item, parent] };
+            if (sql.startsWith('DELETE FROM work_items')) return { rows: [item] };
+            if (sql.startsWith('UPDATE work_items SET')) {
+              return { rows: [{ ...item, parent_work_item_id: PARENT_ID }] };
+            }
+            if (sql === 'COMMIT' && lockOwner === connectionId) {
+              lockOwner = undefined;
+              lockWaiters.shift()?.();
+            }
+            return { rows: [] };
+          }),
+          release: vi.fn(),
+        };
+      }),
+    };
+    const storage = new WorkItemsStoragePG();
+    await storage.init({ pool } as never);
+
+    const deleting = storage.delete('org-1', ITEM_ID);
+    await deleteProjectLock;
+    let updateSettled = false;
+    const updating = storage.update('org-1', ITEM_ID, 'user-1', { parentWorkItemId: PARENT_ID }).finally(() => {
+      updateSettled = true;
+    });
+    await updateWaiting;
+    expect(updateSettled).toBe(false);
+
+    releaseDeleteRowLock();
+    await expect(deleting).resolves.toMatchObject({ id: ITEM_ID });
+    await expect(updating).resolves.toMatchObject({ item: { parentWorkItemId: PARENT_ID } });
   });
 });

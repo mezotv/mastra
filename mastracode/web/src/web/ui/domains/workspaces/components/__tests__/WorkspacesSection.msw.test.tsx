@@ -52,6 +52,7 @@ const githubProject: Project = {
     { branch: 'main', worktreePath: '/sandbox/mastra', baseBranch: 'main' },
     { branch: 'feat-ui', worktreePath: '/sandbox/mastra-worktrees/feat-ui', baseBranch: 'main' },
     { branch: 'feat-api', worktreePath: '/sandbox/mastra-worktrees/feat-api', baseBranch: 'main' },
+    { branch: 'feat-unmatched', worktreePath: '/sandbox/mastra-worktrees/feat-unmatched', baseBranch: 'main' },
     // Personal user session — listed by the User Sessions section instead.
     {
       branch: 'user/alice-notes',
@@ -138,7 +139,7 @@ function sse(): Response {
 }
 
 /** Registers the full agent-controller handler set. */
-function useAgentControllerHandlers(workItems: WorkItem[] = []) {
+function useAgentControllerHandlers(workItems: WorkItem[] = relatedWorkItems) {
   const sessionState = (resourceId: string) => ({
     controllerId: 'code',
     resourceId,
@@ -203,17 +204,18 @@ function rowContainer(name: string): HTMLElement {
 }
 
 describe('WorkspacesSection', () => {
-  it('lists factory worktrees, hides the repo root and user sessions, and marks the selected one active', async () => {
+  it('lists Factory-backed worktrees, hides unmatched worktrees and user sessions, and marks the selected one active', async () => {
     seedActiveProject(githubProject);
-    useAgentControllerHandlers();
+    useAgentControllerHandlers(relatedWorkItems);
 
     renderSection();
 
     expect(await screen.findByText('Work Sessions')).toBeInTheDocument();
     expect(screen.getByText('Review Sessions')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'feat-api' })).toHaveAttribute('aria-current', 'true');
-    expect(screen.getByRole('button', { name: 'feat-ui' })).not.toHaveAttribute('aria-current');
+    expect(await screen.findByRole('button', { name: 'feat-api' })).toHaveAttribute('aria-current', 'true');
+    expect(await screen.findByRole('button', { name: 'feat-ui' })).not.toHaveAttribute('aria-current');
     expect(screen.queryByRole('button', { name: 'main' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'feat-unmatched' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'user/alice-notes' })).not.toBeInTheDocument();
   });
 
@@ -628,7 +630,11 @@ describe('WorkspacesSection', () => {
     expect(deletedThreads).toEqual(['thread-doomed']);
     // The user-session worktree survives; the legacy repo-root entry is
     // dropped for good when the worktree list is rewritten.
-    expect(loadProjects()[0]?.worktrees?.map(worktree => worktree.branch)).toEqual(['feat-api', 'user/alice-notes']);
+    expect(loadProjects()[0]?.worktrees?.map(worktree => worktree.branch)).toEqual([
+      'feat-api',
+      'feat-unmatched',
+      'user/alice-notes',
+    ]);
     expect(loadProjects()[0]?.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-api');
   });
 
@@ -661,6 +667,7 @@ describe('WorkspacesSection', () => {
       'main',
       'feat-ui',
       'feat-api',
+      'feat-unmatched',
       'user/alice-notes',
     ]);
   });
