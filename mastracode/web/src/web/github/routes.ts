@@ -211,6 +211,80 @@ function parseStringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
 }
 
+function polledIssueEvent(
+  project: GithubProjectRow,
+  issue: {
+    number: number;
+    title: string;
+    url: string;
+    author: string | null;
+    labels: string[];
+    createdAt: string;
+  },
+): ParsedGithubWebhook {
+  return {
+    event: 'issues',
+    deliveryId: `poll:${project.repoId}:issue:${issue.number}:${issue.createdAt}`,
+    payload: {
+      action: 'opened',
+      installation: { id: project.installationId },
+      repository: { id: project.repoId, full_name: project.repoFullName },
+      sender: { login: issue.author ?? '__unknown__' },
+      issue: {
+        number: issue.number,
+        title: issue.title,
+        html_url: issue.url,
+        labels: issue.labels.map(name => ({ name })),
+      },
+    },
+  };
+}
+
+function polledPullRequestEvent(
+  project: GithubProjectRow,
+  pullRequest: {
+    number: number;
+    title: string;
+    url: string;
+    author: string | null;
+    headBranch: string;
+    baseBranch: string;
+    createdAt: string;
+  },
+): ParsedGithubWebhook {
+  return {
+    event: 'pull_request',
+    deliveryId: `poll:${project.repoId}:pull-request:${pullRequest.number}:${pullRequest.createdAt}`,
+    payload: {
+      action: 'opened',
+      installation: { id: project.installationId },
+      repository: { id: project.repoId, full_name: project.repoFullName },
+      sender: { login: pullRequest.author ?? '__unknown__' },
+      pull_request: {
+        number: pullRequest.number,
+        title: pullRequest.title,
+        html_url: pullRequest.url,
+        state: 'open',
+        merged: false,
+        head: { ref: pullRequest.headBranch },
+        base: { ref: pullRequest.baseBranch },
+      },
+    },
+  };
+}
+
+async function ingestPolledEvents(
+  events: Array<ParsedGithubWebhook | undefined>,
+  ingestFactoryEvent: MountGithubRoutesOptions['ingestFactoryEvent'],
+): Promise<void> {
+  if (!ingestFactoryEvent) return;
+  const results = await Promise.allSettled(
+    events.filter((event): event is ParsedGithubWebhook => event !== undefined).map(event => ingestFactoryEvent(event)),
+  );
+  const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (rejected) throw rejected.reason;
+}
+
 /**
  * Shape returned to the SPA for a GitHub-backed project, matching the front-end
  * `Project` model (`source: 'github'`).
@@ -644,6 +718,10 @@ export function buildGithubRoutes(options: MountGithubRoutesOptions = {}): ApiRo
             page,
             { label },
           );
+          await ingestPolledEvents(
+            issues.map(issue => polledIssueEvent(loaded.project, issue)),
+            options.ingestFactoryEvent,
+          );
           return c.json({ issues, nextPage });
         } catch (err) {
           return c.json(
@@ -734,6 +812,10 @@ export function buildGithubRoutes(options: MountGithubRoutesOptions = {}): ApiRo
             loaded.project.installationId,
             loaded.project.repoFullName,
             page,
+          );
+          await ingestPolledEvents(
+            pullRequests.map(pullRequest => polledPullRequestEvent(loaded.project, pullRequest)),
+            options.ingestFactoryEvent,
           );
           return c.json({ pullRequests, nextPage });
         } catch (err) {
