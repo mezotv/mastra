@@ -22,8 +22,10 @@ import { buildOAuthRoutes } from './oauth-routes.js';
 import { getGithubFeatureDiagnostics, isGithubFeatureEnabled } from './github/config.js';
 import { buildFactoryRoutes } from './factory/routes.js';
 import { FactoryGithubEventService } from './factory/rules/github-service.js';
+import type { FactoryBindingPreparationInput } from './factory/rules/dispatcher.js';
 import { FactoryStartCoordinator } from './factory/rules/start-coordinator.js';
 import { FactoryTransitionService } from './factory/rules/transition-service.js';
+import { ensureFactoryRuleWorktree } from './github/factory-worktree.js';
 import type { GithubIntegration } from './github/integration.js';
 import type { GithubStorage } from './github/storage/base.js';
 import { buildIntakeRoutes } from './intake/routes.js';
@@ -77,7 +79,10 @@ export interface WebApiRoutesDeps {
    */
   factoryReady: boolean;
   factoryTransitionService?: FactoryTransitionService;
-  onFactoryRuntime?: (runtime: { transitionService: FactoryTransitionService }) => void;
+  onFactoryRuntime?: (runtime: {
+    transitionService: FactoryTransitionService;
+    prepareBinding?: (input: FactoryBindingPreparationInput) => Promise<void>;
+  }) => void;
 }
 
 /**
@@ -332,6 +337,54 @@ async function runIssueTriage(
   return { threadId, projectPath, branch };
 }
 
+export function factoryRuleBranch(item: FactoryBindingPreparationInput['item']): string {
+  const issueNumber = item.metadata.githubIssueNumber ?? item.metadata.number;
+  if (item.source === 'github-issue' && typeof issueNumber === 'number') return `factory/issue-${issueNumber}`;
+  const pullRequestNumber = item.metadata.githubPullRequestNumber ?? item.metadata.number;
+  if (item.source === 'github-pr' && typeof pullRequestNumber === 'number') return `factory/pr-${pullRequestNumber}`;
+  throw new Error('Factory skill invocation requires a GitHub issue or pull request number.');
+}
+
+async function prepareFactoryRuleBinding(
+  github: GithubIntegration,
+  coordinator: FactoryStartCoordinator,
+  input: FactoryBindingPreparationInput,
+): Promise<void> {
+  const project = await github.storageDomain.getOrgProject(input.record.orgId, input.record.githubProjectId);
+  if (!project) throw new Error('Factory GitHub project not found.');
+  const branch = factoryRuleBranch(input.item);
+  const projectPath = await ensureFactoryRuleWorktree(github, project, branch);
+  const destinationStage = input.item.stages.length === 1 ? input.item.stages[0] : undefined;
+  if (!destinationStage) throw new Error('Factory skill invocation requires one exclusive board stage.');
+
+  await coordinator.prepare({
+    orgId: input.record.orgId,
+    userId: project.userId,
+    githubProjectId: project.id,
+    resourceId: project.id,
+    projectPath,
+    branch,
+    threadTitle: `${input.role === 'review' ? 'PR' : 'Issue'}: ${input.item.title}`,
+    kickoffKey: input.record.id,
+    kickoffMessage: null,
+    destinationStage: destinationStage as 'intake' | 'triage' | 'planning' | 'execute' | 'review' | 'done',
+    workItem: {
+      id: input.item.id,
+      role: input.role,
+      input: {
+        source: input.item.source,
+        sourceKey: input.item.sourceKey,
+        parentWorkItemId: input.item.parentWorkItemId,
+        title: input.item.title,
+        url: input.item.url,
+        stages: ['intake'],
+        sessions: input.item.sessions,
+        metadata: input.item.metadata,
+      },
+    },
+  });
+}
+
 /**
  * Disabled-status stub for the well-known integration ids. The SPA polls
  * `/web/github/status` and `/web/linear/status` unconditionally, so when an
@@ -491,10 +544,16 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
     const transitionService =
       deps.factoryTransitionService ??
       new FactoryTransitionService({ rules: getSeededFactoryRules(), storage: workItems });
-    deps.onFactoryRuntime?.({ transitionService });
+    const startCoordinator = new FactoryStartCoordinator(deps.controller, workItems, transitionService);
+    deps.onFactoryRuntime?.({
+      transitionService,
+      ...(githubIntegration
+        ? { prepareBinding: (input: FactoryBindingPreparationInput) => prepareFactoryRuleBinding(githubIntegration, startCoordinator, input) }
+        : {}),
+    });
     return buildFactoryRoutes(githubStorage, {
       transitionService,
-      startCoordinator: new FactoryStartCoordinator(deps.controller, workItems, transitionService),
+      startCoordinator,
       decisionStorage: workItems,
     });
   })();

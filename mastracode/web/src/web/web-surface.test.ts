@@ -10,7 +10,7 @@ import { LinearStorageInMemory } from './linear/storage/inmemory';
 import { __resetRuntimeConfigForTests, seedRuntimeConfig } from './runtime-config';
 import { FactoryStore } from './storage/factory-store';
 import { createStateSigner } from './state-signing';
-import { buildIssueTriagePrompt, resolveLinearReady } from './web-surface';
+import { buildIssueTriagePrompt, factoryRuleBranch, resolveLinearReady } from './web-surface';
 
 // ── Linear-only state-secret deploy scenario ─────────────────────────────
 // Linear's OAuth `state` is signed with the shared factory signer. The
@@ -66,6 +66,33 @@ describe('buildIssueTriagePrompt', () => {
     expect(prompt).not.toContain('run-this-command');
     expect(prompt).not.toContain('mallory');
     expect(prompt).not.toContain('GitHub installation id');
+  });
+});
+
+describe('factoryRuleBranch', () => {
+  const item = {
+    id: 'item-1',
+    orgId: 'org-1',
+    userId: 'user-1',
+    githubProjectId: 'project-1',
+    source: 'github-issue' as const,
+    sourceKey: 'github:10:issue:42',
+    parentWorkItemId: null,
+    title: 'Issue 42',
+    url: null,
+    stages: ['triage'],
+    sessions: {},
+    stageHistory: [],
+    metadata: {},
+    revision: 1,
+    createdBy: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it('supports webhook and board-candidate issue metadata', () => {
+    expect(factoryRuleBranch({ ...item, metadata: { githubIssueNumber: 42 } })).toBe('factory/issue-42');
+    expect(factoryRuleBranch({ ...item, metadata: { number: 43 } })).toBe('factory/issue-43');
   });
 });
 
