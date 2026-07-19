@@ -1585,6 +1585,7 @@ describe('worktree delete route', () => {
       worktreePath: '/workspace/hello/../worktrees/feat/x',
     });
     expect(revokeFactoryBindingsForProjectPath).toHaveBeenCalledWith({
+      orgId: 'org1',
       githubProjectId: 'p1',
       projectPath: '/workspace/hello/../worktrees/feat/x',
     });

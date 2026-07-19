@@ -284,11 +284,11 @@ describe('WorkItemsStoragePG', () => {
       actor: null,
       decision: { type: 'notify', idempotencyKey: 'notify-1', title: 'Moved' },
       status: 'retry',
-      attempts: 3,
+      attempts: 0,
       available_at: now,
       lease_owner: null,
       lease_expires_at: null,
-      last_error: 'terminal failure',
+      last_error: null,
       completed_at: null,
       created_at: new Date('2026-07-01T00:00:00Z'),
       updated_at: now,
@@ -301,9 +301,17 @@ describe('WorkItemsStoragePG', () => {
 
     const retried = await domain.retryDeferredDecision('org1', 'p1', row.id, now);
 
-    expect(retried).toMatchObject({ id: row.id, evaluationId: 'evaluation-1', status: 'retry', attempts: 3 });
+    expect(retried).toMatchObject({
+      id: row.id,
+      evaluationId: 'evaluation-1',
+      status: 'retry',
+      attempts: 0,
+      lastError: null,
+    });
     const query = queries.find(candidate => candidate.text.includes("AND status = 'failed'"))!;
     expect(query.values).toEqual([now, row.id, 'org1', 'p1']);
+    expect(sqlOf(query)).toContain("SET status = 'retry', attempts = 0");
+    expect(sqlOf(query)).toContain("last_error = NULL");
     expect(sqlOf(query)).toContain("WHERE id = $2 AND org_id = $3 AND github_project_id = $4 AND status = 'failed'");
   });
 

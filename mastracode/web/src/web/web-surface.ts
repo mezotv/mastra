@@ -411,6 +411,7 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
           ...(workItems
             ? {
                 revokeFactoryBindingsForProjectPath: async (input: {
+                  orgId: string;
                   githubProjectId: string;
                   projectPath: string;
                 }) => {
@@ -419,6 +420,7 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
                     bindings
                       .filter(
                         binding =>
+                          binding.orgId === input.orgId &&
                           binding.githubProjectId === input.githubProjectId &&
                           binding.projectPath === input.projectPath,
                       )

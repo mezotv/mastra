@@ -436,9 +436,11 @@ export class WorkItemsStorageInMemory extends WorkItemsStorage {
     const retrying: FactoryDeferredDecisionRecord = {
       ...decision,
       status: 'retry',
+      attempts: 0,
       availableAt: now,
       leaseOwner: null,
       leaseExpiresAt: null,
+      lastError: null,
       completedAt: null,
       updatedAt: now,
     };

@@ -933,8 +933,8 @@ export class WorkItemsStoragePG extends WorkItemsStorage {
   ): Promise<FactoryDeferredDecisionRecord | null> {
     const { rows } = await this.#db.query<DeferredDecisionDbRow>(
       `UPDATE factory_deferred_decisions
-       SET status = 'retry', available_at = $1, lease_owner = NULL, lease_expires_at = NULL,
-           completed_at = NULL, updated_at = $1
+       SET status = 'retry', attempts = 0, available_at = $1, lease_owner = NULL, lease_expires_at = NULL,
+           last_error = NULL, completed_at = NULL, updated_at = $1
        WHERE id = $2 AND org_id = $3 AND github_project_id = $4 AND status = 'failed'
        RETURNING *`,
       [now, decisionId, orgId, githubProjectId],
