@@ -298,23 +298,28 @@ export class FactoryDecisionDispatcher {
       },
       reuseMode: 'preserve',
     });
-    if (result.item.metadata.factoryRuleMaterializationKey !== record.idempotencyKey) return;
+    const materializedByDecision = result.item.metadata.factoryRuleMaterializationKey === record.idempotencyKey;
+    if (!materializedByDecision && (decision.stage === 'intake' || !result.item.stages.includes('intake'))) return;
 
     const board = boardForSource(result.item.source);
-    const initial = await this.#transitionService.transition({
-      orgId: record.orgId,
-      githubProjectId: record.githubProjectId,
-      workItemId: result.item.id,
-      board,
-      stage: 'intake',
-      expectedRevision: result.item.revision,
-      actor: deferredActor(record),
-      ingress: { type: 'rule', identity: `decision:${record.idempotencyKey}:initial-entry` },
-      cause: 'linked_item_materialized',
-      causalChain,
-      initialEntry: true,
-    });
-    if (initial.status === 'rejected') throw new Error(`${initial.code}: ${initial.reason}`);
+    let expectedRevision = result.item.revision;
+    if (materializedByDecision) {
+      const initial = await this.#transitionService.transition({
+        orgId: record.orgId,
+        githubProjectId: record.githubProjectId,
+        workItemId: result.item.id,
+        board,
+        stage: 'intake',
+        expectedRevision,
+        actor: deferredActor(record),
+        ingress: { type: 'rule', identity: `decision:${record.idempotencyKey}:initial-entry` },
+        cause: 'linked_item_materialized',
+        causalChain,
+        initialEntry: true,
+      });
+      if (initial.status === 'rejected') throw new Error(`${initial.code}: ${initial.reason}`);
+      expectedRevision = initial.revision;
+    }
     if (decision.stage === 'intake') return;
 
     const moved = await this.#transitionService.transition({
@@ -323,10 +328,10 @@ export class FactoryDecisionDispatcher {
       workItemId: result.item.id,
       board,
       stage: decision.stage,
-      expectedRevision: initial.revision,
+      expectedRevision,
       actor: { type: 'system', id: 'factory-rule-dispatcher' },
       ingress: { type: 'rule', identity: `decision:${record.idempotencyKey}:destination` },
-      cause: 'linked_item_materialized',
+      cause: materializedByDecision ? 'linked_item_materialized' : 'linked_item_reconciled',
       causalChain,
     });
     if (moved.status === 'rejected') throw new Error(`${moved.code}: ${moved.reason}`);
@@ -339,7 +344,10 @@ export class FactoryDecisionDispatcher {
     return item;
   }
 
-  async #findBinding(record: FactoryDeferredDecisionRecord, role?: string): Promise<FactoryRunBindingRecord | undefined> {
+  async #findBinding(
+    record: FactoryDeferredDecisionRecord,
+    role?: string,
+  ): Promise<FactoryRunBindingRecord | undefined> {
     if (!record.workItemId) throw new Error('Factory decision is not linked to a work item.');
     const bindings = await this.#storage.listRunBindings(record.orgId, record.githubProjectId, record.workItemId);
     return bindings
@@ -357,7 +365,10 @@ export class FactoryDecisionDispatcher {
     return binding;
   }
 
-  async #requireOrPrepareBinding(record: FactoryDeferredDecisionRecord, role: string): Promise<FactoryRunBindingRecord> {
+  async #requireOrPrepareBinding(
+    record: FactoryDeferredDecisionRecord,
+    role: string,
+  ): Promise<FactoryRunBindingRecord> {
     const binding = await this.#findBinding(record, role);
     if (binding) return binding;
     if (!this.#prepareBinding) throw new Error(`No active Factory binding for role ${role}.`);

@@ -374,10 +374,10 @@ describe('FactoryDecisionDispatcher', () => {
     expect(prepareBinding).toHaveBeenCalledWith(
       expect.objectContaining({ item: expect.objectContaining({ id: item.id }), role: 'triage' }),
     );
-    expect(sendNotificationSignal).toHaveBeenCalledWith(
-      expect.objectContaining({ dedupeKey: 'skill-auto-start' }),
-      { ifActive: { behavior: 'deliver' }, ifIdle: { behavior: 'wake' } },
-    );
+    expect(sendNotificationSignal).toHaveBeenCalledWith(expect.objectContaining({ dedupeKey: 'skill-auto-start' }), {
+      ifActive: { behavior: 'deliver' },
+      ifIdle: { behavior: 'wake' },
+    });
   });
 
   it('retries after post-delivery completion ambiguity without delivering the notification twice', async () => {
@@ -544,6 +544,63 @@ describe('FactoryDecisionDispatcher', () => {
     await dispatcher.runOnce(new Date('2030-01-01T00:00:00Z'));
 
     expect(intakeEntered).not.toHaveBeenCalled();
+    expect((await storage.listDeferredDecisions('org-1', PROJECT_ID))[0]?.status).toBe('succeeded');
+  });
+
+  it('advances a matching independently-created Intake item without replaying Intake entry', async () => {
+    const storage = new WorkItemsStorageInMemory();
+    const parent = await createItem(storage);
+    const existing = await createItem(storage, 'github-issue:2');
+    const intakeEntered = vi.fn();
+    const triageEntered = vi.fn();
+    const rules = defaultFactoryRules({
+      version: 'rules-v1',
+      overrides: {
+        work: {
+          execute: {
+            issue: {
+              onEnter: () => ({
+                type: 'upsertLinkedWorkItem',
+                idempotencyKey: 'linked-1',
+                board: 'work',
+                source: 'github-issue',
+                sourceKey: 'github-issue:2',
+                title: 'Linked issue',
+                url: null,
+                stage: 'triage',
+              }),
+            },
+          },
+          intake: { issue: { onEnter: intakeEntered } },
+          triage: { issue: { onEnter: triageEntered } },
+        },
+      },
+    });
+    const transitionService = new FactoryTransitionService({ storage, rules });
+    await transitionService.transition({
+      orgId: 'org-1',
+      githubProjectId: PROJECT_ID,
+      workItemId: parent.id,
+      board: 'work',
+      stage: 'execute',
+      expectedRevision: parent.revision,
+      actor: { type: 'human', id: 'user-1' },
+      ingress: { type: 'human', identity: 'move-linked' },
+      cause: 'test',
+    });
+    const { controller } = createSession();
+    const dispatcher = new FactoryDecisionDispatcher({
+      controller: controller as never,
+      transitionService,
+      storage,
+      ownerId: 'worker-1',
+    });
+
+    await dispatcher.runOnce(new Date('2030-01-01T00:00:00Z'));
+
+    expect(await storage.get('org-1', PROJECT_ID, existing.id)).toMatchObject({ stages: ['triage'] });
+    expect(intakeEntered).not.toHaveBeenCalled();
+    expect(triageEntered).toHaveBeenCalledTimes(1);
     expect((await storage.listDeferredDecisions('org-1', PROJECT_ID))[0]?.status).toBe('succeeded');
   });
 
