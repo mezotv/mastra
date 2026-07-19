@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ToolSet } from '@internal/ai-sdk-v5';
 import { z } from 'zod/v4';
+import { stopGoalActivity } from '../../../agent/goal';
 import { MastraFGAPermissions } from '../../../auth/ee';
 import { createBackgroundTask } from '../../../background-tasks/create';
 import { resolveBackgroundConfig } from '../../../background-tasks/resolve-config';
@@ -33,6 +34,7 @@ import {
   GENERATE_ID_KEY,
   MEMORY_CONFIG_KEY,
   MEMORY_KEY,
+  NOW_KEY,
   RESOURCE_ID_KEY,
   SAVE_QUEUE_MANAGER_KEY,
   STEP_ACTIVE_TOOLS_KEY,
@@ -512,6 +514,11 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
 
         if (toolRequiresApproval) {
           if (!resumeData) {
+            await stopGoalActivity({
+              agentId,
+              runId,
+              now: readScoped(scopeCtx, NOW_KEY, 'now'),
+            });
             const approvalChunk = await transformChunk(
               {
                 type: 'tool-call-approval',
