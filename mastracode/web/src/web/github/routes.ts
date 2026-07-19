@@ -91,6 +91,8 @@ export interface MountGithubRoutesOptions {
   runIssueTriage?: (input: GithubIssueTriageRunInput) => Promise<GithubIssueTriageRunResult>;
   /** Authoritative Factory rule ingress for normalized, signature-verified GitHub deliveries. */
   ingestFactoryEvent?: (event: ParsedGithubWebhook) => Promise<unknown>;
+  /** Revoke Factory agent authority before deleting the worktree that scopes it. */
+  revokeFactoryBindingsForProjectPath?: (input: { githubProjectId: string; projectPath: string }) => Promise<void>;
 }
 
 function pullRequestNumberFromUrl(value: string, expectedRepo: string): number | undefined {
@@ -793,7 +795,7 @@ export function buildGithubRoutes(options: MountGithubRoutesOptions = {}): ApiRo
   );
 
   // ── Worktree / branch / commit / push / PR ──────────────────────────────
-  routes.push(...buildProjectGitRoutes(github));
+  routes.push(...buildProjectGitRoutes(github, options.revokeFactoryBindingsForProjectPath));
 
   return routes;
 }
@@ -961,7 +963,10 @@ async function loadOwnedProject(
   return { orgId, userId, project, sandboxRow };
 }
 
-function buildProjectGitRoutes(github: GithubIntegration): ApiRoute[] {
+function buildProjectGitRoutes(
+  github: GithubIntegration,
+  revokeFactoryBindingsForProjectPath?: (input: { githubProjectId: string; projectPath: string }) => Promise<void>,
+): ApiRoute[] {
   return [
     // ── Create / reuse a worktree + feature branch ──────────────────────────
     registerApiRoute('/web/github/projects/:id/worktree', {
@@ -1072,6 +1077,10 @@ function buildProjectGitRoutes(github: GithubIntegration): ApiRoute[] {
         try {
           return await withProjectLock(`${project.id}:${userId}`, async () => {
             const sandbox = await resolveProjectSandbox(sandboxRow);
+            await revokeFactoryBindingsForProjectPath?.({
+              githubProjectId: project.id,
+              projectPath: worktreeRow.worktreePath,
+            });
             await removeWorktree(sandbox, sandboxRow.sandboxWorkdir, {
               branch,
               worktreePath: worktreeRow.worktreePath,

@@ -451,6 +451,7 @@ export class GithubIntegration implements FactoryIntegration {
       controller: ctx.controller,
       runIssueTriage: ctx.hooks?.runIssueTriage,
       ingestFactoryEvent: ctx.hooks?.ingestGithubEvent,
+      revokeFactoryBindingsForProjectPath: ctx.hooks?.revokeFactoryBindingsForProjectPath,
     });
   }
 

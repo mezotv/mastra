@@ -408,6 +408,32 @@ export function assembleWebApiRoutes(deps: WebApiRoutesDeps): ApiRoute[] {
                   githubEventService.ingest(event),
               }
             : {}),
+          ...(workItems
+            ? {
+                revokeFactoryBindingsForProjectPath: async (input: {
+                  githubProjectId: string;
+                  projectPath: string;
+                }) => {
+                  const bindings = await workItems.listActiveRunBindings();
+                  await Promise.all(
+                    bindings
+                      .filter(
+                        binding =>
+                          binding.githubProjectId === input.githubProjectId &&
+                          binding.projectPath === input.projectPath,
+                      )
+                      .map(binding =>
+                        workItems.revokeRunBinding({
+                          orgId: binding.orgId,
+                          githubProjectId: binding.githubProjectId,
+                          bindingId: binding.id,
+                          revokedAt: new Date(),
+                        }),
+                      ),
+                  );
+                },
+              }
+            : {}),
         },
       }
     : undefined;

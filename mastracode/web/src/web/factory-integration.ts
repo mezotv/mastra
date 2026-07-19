@@ -54,6 +54,7 @@ export interface IssueTriageRunResult {
 export interface IntegrationHooks {
   runIssueTriage?: (input: IssueTriageRunInput) => Promise<IssueTriageRunResult>;
   ingestGithubEvent?: (event: ParsedGithubWebhook) => Promise<unknown>;
+  revokeFactoryBindingsForProjectPath?: (input: { githubProjectId: string; projectPath: string }) => Promise<void>;
 }
 
 /**

@@ -382,6 +382,9 @@ function buildApp(
     controller?: NonNullable<Parameters<typeof buildGithubRoutes>[0]>['controller'];
     runIssueTriage?: (input: any) => Promise<{ threadId?: string; projectPath?: string; branch?: string }>;
     ingestFactoryEvent?: NonNullable<Parameters<typeof buildGithubRoutes>[0]>['ingestFactoryEvent'];
+    revokeFactoryBindingsForProjectPath?: NonNullable<
+      Parameters<typeof buildGithubRoutes>[0]
+    >['revokeFactoryBindingsForProjectPath'];
     stateSigner?: typeof stateSigner | null;
   } = {},
 ) {
@@ -1566,9 +1569,10 @@ describe('worktree delete route', () => {
     expect(removeWorktree).not.toHaveBeenCalled();
   });
 
-  it('removes the checkout, deletes the row, and returns the path', async () => {
+  it('revokes scoped Factory bindings before removing the checkout', async () => {
     seedMaterializedProject();
-    const app = buildApp({ workosId: 'u1' });
+    const revokeFactoryBindingsForProjectPath = vi.fn().mockResolvedValue(undefined);
+    const app = buildApp({ workosId: 'u1' }, { revokeFactoryBindingsForProjectPath });
     await postJson(app, '/web/github/projects/p1/worktree', { branch: 'feat/x' });
     expect(tables.worktrees).toHaveLength(1);
 
@@ -1580,6 +1584,13 @@ describe('worktree delete route', () => {
       branch: 'feat/x',
       worktreePath: '/workspace/hello/../worktrees/feat/x',
     });
+    expect(revokeFactoryBindingsForProjectPath).toHaveBeenCalledWith({
+      githubProjectId: 'p1',
+      projectPath: '/workspace/hello/../worktrees/feat/x',
+    });
+    expect(revokeFactoryBindingsForProjectPath.mock.invocationCallOrder[0]).toBeLessThan(
+      removeWorktree.mock.invocationCallOrder[0]!,
+    );
     expect(removeWorktree).toHaveBeenCalledOnce();
     expect(removeWorktree).toHaveBeenCalledWith(expect.anything(), '/workspace/hello', {
       branch: 'feat/x',
