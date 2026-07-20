@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { server } from '../../../../e2e/web-ui/msw-server';
 import { renderHookWithProviders, waitForMutationsIdle, TEST_BASE_URL } from '../../../../e2e/web-ui/render';
+import { queryKeys } from '../../api/keys';
 import type { Project } from '../../../web/ui/domains/workspaces/services/projects';
 import { loadProjects, saveProjects } from '../../../web/ui/domains/workspaces/services/projects';
 import { useProjectsQuery } from '../useProjects';
@@ -116,13 +117,13 @@ describe('workspaces query hooks', () => {
     await act(async () => {
       await result.current.selectWorkspace.mutateAsync('/sandbox/mastra-worktrees/feat-api');
     });
-    await waitForMutationsIdle(client);
 
     expect(loadProjects()[0]?.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-api');
-    await waitFor(() => expect(result.current.workspaces.data?.selected?.branch).toBe('feat-api'));
-    await waitFor(() =>
-      expect(result.current.projects.data[0]?.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-api'),
+    expect(client.getQueryData<Project[]>(queryKeys.projects())?.[0]?.selectedWorktreePath).toBe(
+      '/sandbox/mastra-worktrees/feat-api',
     );
+    await waitFor(() => expect(result.current.workspaces.data?.selected?.branch).toBe('feat-api'));
+    await waitForMutationsIdle(client);
   });
 
   it('creates a workspace, persists it, selects it, and refetches the workspaces query', async () => {

@@ -47,17 +47,24 @@ export function deriveProjectPath(project: Project | null | undefined): string {
   return project.path ?? '';
 }
 
-function invalidateWorkspaceQueries(
+async function invalidateWorkspaceQueries(
   queryClient: ReturnType<typeof useQueryClient>,
   project: Project,
   scope?: AgentControllerThreadsScope,
 ) {
-  const projectPath = deriveProjectPath(latestProject(project));
-  void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces(project.id) });
-  void queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
-  void queryClient.invalidateQueries({
-    queryKey: queryKeys.agentControllerThreads(scope?.agentControllerId, scope?.resourceId, projectPath),
-  });
+  const currentProjects = queryClient.getQueryData<Project[]>(queryKeys.projects());
+  queryClient.setQueryData<Project[]>(
+    queryKeys.projects(),
+    currentProjects?.map(current => (current.id === project.id ? project : current)) ?? loadProjects(),
+  );
+  const projectPath = deriveProjectPath(project);
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: queryKeys.workspaces(project.id) }),
+    queryClient.invalidateQueries({ queryKey: queryKeys.projects() }),
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.agentControllerThreads(scope?.agentControllerId, scope?.resourceId, projectPath),
+    }),
+  ]);
 }
 
 function workspacesData(project: Project): WorkspacesData {
