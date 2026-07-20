@@ -8,13 +8,12 @@
  * a factory opened in the TUI and in the web app map to the same session and
  * therefore the same threads. Start in the TUI, continue on the web.
  *
- * When a factory is selected, the web app creates a session scoped to that
- * resourceId and sets `projectPath` on the session state; the server-side
- * workspace factory reads it to resolve the working directory. `projectPath`
- * remains the SDK/TUI session tag for the execution workspace path.
+ * GitHub session workspaces use the repository row id as `resourceId` and the
+ * persisted `github_sessions.id` as scope; the server-side workspace factory
+ * resolves and prepares that checkout on demand.
  */
 
-import type { GithubSessionResult, MaterializeResult } from './github';
+import type { GithubSessionResult } from './github';
 
 const STORAGE_KEY = 'mastracode-factories';
 const ACTIVE_KEY = 'mastracode-active-factory';
@@ -73,9 +72,8 @@ export interface GithubFactoryBinding {
    */
   gitBranch?: string;
   /**
-   * Cloud sandbox binding for a GitHub factory, persisted after the repo is
-   * materialized so a re-opened factory (e.g. after a page reload) can reattach
-   * to the same sandbox without re-running the open flow first.
+   * Legacy/base sandbox binding for a GitHub factory. New session workspaces are
+   * prepared from the persisted session id by the server-side workspace factory.
    */
   sandboxId?: string;
   sandboxWorkdir?: string;
@@ -113,7 +111,7 @@ export interface LocalFactory extends FactoryBase {
 }
 
 /**
- * GitHub factories may omit `resourceId` until materialization succeeds on open.
+ * GitHub factories use the server-side repository row id as `resourceId`.
  * `Factory.id` is always a browser UUID distinct from `binding.githubProjectId`.
  */
 export interface GithubFactory extends FactoryBase {
@@ -245,8 +243,9 @@ export function saveFactories(factories: Factory[]): void {
 }
 
 /**
- * Load factories. Local factories always carry resourceId at creation time;
- * GitHub factories resolve resourceId on materialization, not list load.
+ * Load factories. Local factories carry resourceId from path resolution; newer
+ * GitHub factories carry the repository row id, while older stored records may
+ * rely on call-site fallback to `binding.githubProjectId`.
  */
 export async function loadFactoriesWithResolvedIds(_baseUrl: string): Promise<Factory[]> {
   return loadFactories();
@@ -283,7 +282,7 @@ export async function addLocalFactory(baseUrl: string, name: string, path: strin
  * are the repository UUID. The browser always generates a new Factory.id and
  * copies the repository UUID only onto `binding.githubProjectId`. Reconnecting
  * the same repository returns the existing Factory without replacing its browser
- * ID. The `resourceId` is filled in later, on open, by `ensureRepoMaterialized`.
+ * ID. The `resourceId` is the repository UUID used by session workspace factories.
  */
 export function addGithubFactory(payload: GithubConnectedRepositoryPayload): GithubFactory {
   const factories = loadFactories();
@@ -296,6 +295,7 @@ export function addGithubFactory(payload: GithubConnectedRepositoryPayload): Git
   const stored: GithubFactory = {
     id: crypto.randomUUID(),
     name: payload.name,
+    resourceId: payload.githubProjectId,
     binding: {
       kind: 'github',
       githubProjectId: payload.githubProjectId,
@@ -315,26 +315,6 @@ export function addGithubFactory(payload: GithubConnectedRepositoryPayload): Git
 export function updateFactory(factory: Factory): void {
   const factories = loadFactories().map(item => (item.id === factory.id ? factory : item));
   saveFactories(factories);
-}
-
-/**
- * Merge a server `MaterializeResult` (from the `/ensure` route) into a stored
- * GitHub factory and persist it: records the session `resourceId` plus the
- * sandbox binding. The repo-root checkout is not a workspace, so no worktree
- * is seeded — workspaces only exist once created explicitly.
- */
-export function applyMaterializeResult(factory: GithubFactory, result: MaterializeResult): GithubFactory {
-  const updated: GithubFactory = {
-    ...factory,
-    resourceId: result.resourceId,
-    binding: {
-      ...factory.binding,
-      sandboxId: result.sandboxId,
-      sandboxWorkdir: result.sandboxWorkdir,
-    },
-  };
-  updateFactory(updated);
-  return updated;
 }
 
 /**

@@ -111,6 +111,15 @@ async function authorizeSessionAddress(
       return { allowed: false, status: 403, code: 'session_forbidden', message: 'Session access denied.' };
     }
   }
+  const session = await storage.getSession(address.scope);
+  if (
+    session?.orgId === tenant.orgId &&
+    session.userId === tenant.userId &&
+    session.githubProjectId === address.resourceId
+  ) {
+    return { allowed: true };
+  }
+
   const worktree = await storage.findWorktreeByPath(address.resourceId, tenant.userId, address.scope);
   return worktree?.orgId === tenant.orgId
     ? { allowed: true }

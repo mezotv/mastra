@@ -966,6 +966,13 @@ function ownerIdForSession(session: ControllerSession): string {
   return session.identity.getOwnerId();
 }
 
+function sessionSandboxWorkdir(row: GithubSessionRow, project: GithubProjectRow): string | null {
+  if (getSandboxProvider() === 'local') {
+    return computeLocalSessionSandboxWorkdir(project.repoFullName, row.id);
+  }
+  return row.sandboxWorkdir;
+}
+
 function serializeGithubSession(row: GithubSessionRow, project: GithubProjectRow) {
   return {
     id: row.id,
@@ -976,7 +983,7 @@ function serializeGithubSession(row: GithubSessionRow, project: GithubProjectRow
     baseBranch: row.baseBranch,
     threadId: row.threadId,
     sandboxId: row.sandboxId,
-    sandboxWorkdir: row.sandboxWorkdir,
+    sandboxWorkdir: sessionSandboxWorkdir(row, project),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -1113,8 +1120,13 @@ function buildProjectGitRoutes(github: GithubIntegration, controller?: MountedMa
                 githubProjectId: project.id,
                 branch,
                 baseBranch,
-                sandboxWorkdir: project.sandboxWorkdir,
+                sandboxWorkdir: getSandboxProvider() === 'local' ? null : project.sandboxWorkdir,
               }));
+            if (!existing && getSandboxProvider() === 'local') {
+              const sandboxWorkdir = computeLocalSessionSandboxWorkdir(project.repoFullName, sessionRow.id);
+              await github.storageDomain.setSessionSandbox(sessionRow.id, sessionRow.sandboxId, sandboxWorkdir);
+              sessionRow.sandboxWorkdir = sandboxWorkdir;
+            }
             const session = await ensureGithubControllerSession({
               c: loose(c),
               github,

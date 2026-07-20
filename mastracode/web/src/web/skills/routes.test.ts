@@ -287,7 +287,7 @@ describe('workspace skill invocation route', () => {
     expect(harness.sendA).not.toHaveBeenCalled();
   });
 
-  it('enforces authenticated tenant worktree ownership before session lookup', async () => {
+  it('enforces authenticated tenant GitHub session or worktree ownership before session lookup', async () => {
     vi.mocked(webAuthTenant).mockReturnValue({ userId: 'user-1', orgId: 'org-1' });
     const githubStorage = new GithubStorageInMemory();
     const sendMessage = vi.fn(async () => {});
@@ -331,6 +331,29 @@ describe('workspace skill invocation route', () => {
       message: 'Session access denied.',
     });
     expect(getSessionByResource).not.toHaveBeenCalled();
+
+    githubStorage.sessions.push({
+      id: 'session-1',
+      orgId: 'org-1',
+      userId: 'user-1',
+      githubProjectId: projectId,
+      branch: 'user/test',
+      baseBranch: 'main',
+      threadId: 'thread-1',
+      sandboxId: null,
+      sandboxWorkdir: '/Users/test/.mastracode/web/sandboxes/github-sessions/octo/hello/session-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const allowedSession = await prepare(app, {
+      resourceId: projectId,
+      scope: 'session-1',
+      name: 'understand-pr',
+    });
+    expect(allowedSession.status).toBe(200);
+    expect(getSessionByResource).toHaveBeenCalledWith(projectId, 'session-1');
+    getSessionByResource.mockClear();
+    sendMessage.mockClear();
 
     githubStorage.worktrees.push({
       id: 'worktree-1',

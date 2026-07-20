@@ -189,7 +189,7 @@ const materializeRepo = vi.fn(async (..._args: any[]) => {
   const onProgress = _args[5] as ((e: any) => void) | undefined;
   onProgress?.({ phase: 'cloning', message: 'Cloning octo/hello…' });
 });
-const reattachSandbox = vi.fn(async (_id: string) => ({ id: 'sb' }));
+const reattachSandbox = vi.fn(async (_id: string, _options?: unknown) => ({ id: 'sb' }));
 const ensureWorktree = vi.fn(async (_sb: any, _workdir: string, opts: { branch: string; baseBranch: string }) => ({
   worktreePath: `/workspace/hello/../worktrees/${opts.branch}`,
   branch: opts.branch,
@@ -201,6 +201,7 @@ const commitAll = vi.fn(async () => ({ committed: true }));
 const pushBranch = vi.fn(async () => {});
 const createPullRequest = vi.fn(async () => ({ url: 'https://github.com/octo/hello/pull/1' }));
 let sandboxEnabled = true;
+let sandboxProvider = 'railway';
 vi.mock('../sandbox/fleet', () => {
   class SandboxBudgetError extends Error {
     readonly code = 'sandbox-budget-exceeded';
@@ -210,9 +211,12 @@ vi.mock('../sandbox/fleet', () => {
   }
   return {
     computeSandboxWorkdir: (repo: string) => `/workspace/${repo.split('/').pop()}`,
-    getSandboxProvider: () => 'railway',
+    computeLocalSessionSandboxWorkdir: (repo: string, sessionId: string) =>
+      `/Users/test/.mastracode/web/sandboxes/github-sessions/${repo}/${sessionId}`,
+    getSandboxProvider: () => sandboxProvider,
     isSandboxEnabled: () => sandboxEnabled,
-    reattachSandbox: (id: string) => reattachSandbox(id),
+    reattachSandbox: (id: string, options?: unknown) =>
+      options === undefined ? reattachSandbox(id) : reattachSandbox(id, options),
     SandboxBudgetError,
   };
 });
@@ -417,9 +421,11 @@ beforeEach(() => {
   githubStorage.projects = tables.projects as any;
   githubStorage.sandboxes = tables.sandboxes as any;
   githubStorage.worktrees = tables.worktrees as any;
+  githubStorage.sessions = [];
   githubStorage.subscriptions = tables.subscriptions as any;
   featureEnabled = true;
   sandboxEnabled = true;
+  sandboxProvider = 'railway';
   cookieUser = null;
   auditRecorded = [];
   auditFailure = undefined;
@@ -1086,6 +1092,32 @@ function postJson(app: ReturnType<typeof buildApp>, path: string, body: unknown)
     body: JSON.stringify(body),
   });
 }
+
+describe('GitHub sessions route', () => {
+  it('returns the host local sandbox checkout path when creating a local-provider session', async () => {
+    sandboxProvider = 'local';
+    seedMaterializedProject();
+    const controller = {
+      createSession: vi.fn(async () => ({
+        identity: { getOwnerId: () => 'u1' },
+        thread: { getId: () => 'thread-session' },
+      })),
+    } as unknown as NonNullable<Parameters<typeof buildGithubRoutes>[0]>['controller'];
+
+    const res = await postJson(buildApp({ workosId: 'u1' }, { controller }), '/web/github/projects/p1/sessions', {
+      branch: 'user/test-local',
+      baseBranch: 'main',
+    });
+
+    expect(res.status).toBe(201);
+    const json = await res.json();
+    expect(json.sandboxWorkdir).toBe(
+      `/Users/test/.mastracode/web/sandboxes/github-sessions/octo/hello/${json.id}`,
+    );
+    expect(githubStorage.sessions[0]?.sandboxWorkdir).toBe(json.sandboxWorkdir);
+    expect(json.sandboxWorkdir).not.toBe('/workspace/hello');
+  });
+});
 
 describe('issues route', () => {
   it('401s without an authenticated user', async () => {

@@ -1,6 +1,6 @@
 import { act, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { server } from '../../../../e2e/web-ui/msw-server';
 import { renderHookWithProviders, waitForMutationsIdle, TEST_BASE_URL } from '../../../../e2e/web-ui/render';
@@ -177,6 +177,7 @@ describe('factories query hooks', () => {
 
     expect(first).toBeDefined();
     expect(first!.id).not.toBe('github-project-1');
+    expect(first!.resourceId).toBe('github-project-1');
     if (first!.binding.kind !== 'github') throw new Error('expected github binding');
     expect(first!.binding.githubProjectId).toBe('github-project-1');
     expect(first!.binding.worktrees).toEqual([]);
@@ -192,6 +193,27 @@ describe('factories query hooks', () => {
 
     expect(second!.id).toBe(first!.id);
     expect(loadFactories()).toHaveLength(1);
+  });
+
+  it('selects a GitHub factory without calling project-level materialization', async () => {
+    const ensureRequested = vi.fn();
+    saveFactories([githubFactory]);
+    server.use(
+      http.post(`${ORIGIN}/web/github/repositories/${githubFactory.binding.githubProjectId}/ensure`, () => {
+        ensureRequested();
+        return HttpResponse.json({ error: 'unexpected_ensure' }, { status: 500 });
+      }),
+    );
+
+    const { result } = renderHookWithProviders(() => useActiveFactory());
+
+    await act(async () => {
+      await result.current.selectFactory(githubFactory);
+    });
+
+    await waitFor(() => expect(result.current.activeFactory?.id).toBe(githubFactory.id));
+    expect(result.current.resourceId).toBe(githubFactory.binding.githubProjectId);
+    expect(ensureRequested).not.toHaveBeenCalled();
   });
 
   it('keeps active factory selection across reloads when stored under the new key', async () => {
