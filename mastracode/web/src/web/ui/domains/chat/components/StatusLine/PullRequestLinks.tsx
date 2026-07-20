@@ -61,19 +61,20 @@ export function PullRequestLinks({
         session => session.threadId === threadId && (!projectPath || session.projectPath === projectPath),
       ),
   );
-  const reviewNumber = reviewItem?.metadata.number;
+  const reviewNumber = reviewItem?.metadata.githubPullRequestNumber ?? reviewItem?.metadata.number;
+  const normalizedReviewNumber = Number(reviewNumber);
   const factorySubscription: PullRequestSubscription | undefined =
     reviewItem &&
     githubProjectName &&
     (typeof reviewNumber === 'number' || typeof reviewNumber === 'string') &&
-    Number.isInteger(Number(reviewNumber))
+    Number.isInteger(normalizedReviewNumber)
       ? {
           id: `factory-work-item:${reviewItem.id}`,
           repoFullName: githubProjectName,
-          pullRequestNumber: Number(reviewNumber),
+          pullRequestNumber: normalizedReviewNumber,
           status:
             reviewItem.metadata.merged === true ? 'merged' : reviewItem.metadata.state === 'closed' ? 'closed' : 'open',
-          url: `https://github.com/${githubProjectName}/pull/${reviewNumber}`,
+          url: `https://github.com/${githubProjectName}/pull/${normalizedReviewNumber}`,
         }
       : undefined;
   const notificationIds = transcriptEntries

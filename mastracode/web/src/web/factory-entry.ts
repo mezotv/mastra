@@ -45,7 +45,11 @@ import { getFactoryStore, getSeededGithubIntegration, seedRuntimeConfig } from '
 import { FactoryStore } from './storage/factory-store.js';
 import { AuditStoragePG } from './storage/domains/audit/pg.js';
 import { ModelCredentialsStoragePG } from './storage/domains/credentials/pg.js';
-import { createTenantCredentialPrimer, registerTenantCredentialResolver } from './tenant-credentials.js';
+import {
+  createTenantCredentialPrimer,
+  primeTenantCredentials,
+  registerTenantCredentialResolver,
+} from './tenant-credentials.js';
 import { IntakeStoragePG } from './storage/domains/intake/pg.js';
 import { WorkItemsStoragePG } from './storage/domains/work-items/pg.js';
 import { handleServerError } from './server-error.js';
@@ -503,6 +507,7 @@ export class MastraFactory {
               storage: getFactoryStore().workItems,
               reconcileToolResults: () => factoryProcessor?.reconcileAllBoundThreads() ?? Promise.resolve(),
               prepareBinding,
+              primeCredentials: primeTenantCredentials,
             });
           },
         }),
