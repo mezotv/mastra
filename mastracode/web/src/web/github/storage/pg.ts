@@ -13,9 +13,11 @@ import type pg from 'pg';
 import type { FactoryStorageContext } from '../../storage/domain';
 import { GithubStorage, normalizedSessionScope } from './base';
 import type {
+  CreateGithubSessionInput,
   GithubInstallationRow,
   GithubProjectRow,
   GithubProjectSandboxRow,
+  GithubSessionRow,
   GithubSignalSubscriptionRow,
   GithubSignalSubscriptionStatus,
   GithubWebhookPullRequestTarget,
@@ -94,6 +96,26 @@ ALTER TABLE github_worktrees ADD COLUMN IF NOT EXISTS org_id text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS github_worktrees_project_user_branch_unique
   ON github_worktrees (github_project_id, user_id, branch);
+
+CREATE TABLE IF NOT EXISTS github_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id text NOT NULL,
+  user_id text NOT NULL,
+  github_project_id uuid NOT NULL,
+  branch text NOT NULL,
+  base_branch text NOT NULL,
+  thread_id text,
+  sandbox_id text,
+  sandbox_workdir text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS github_sessions_project_user_branch_unique
+  ON github_sessions (github_project_id, user_id, branch);
+
+CREATE INDEX IF NOT EXISTS github_sessions_project_user_lookup
+  ON github_sessions (github_project_id, user_id);
 
 CREATE TABLE IF NOT EXISTS github_signal_subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -228,6 +250,36 @@ function toWorktree(db: WorktreeDbRow): GithubWorktreeRow {
     baseBranch: db.base_branch,
     worktreePath: db.worktree_path,
     createdAt: db.created_at,
+  };
+}
+
+interface SessionDbRow {
+  id: string;
+  org_id: string;
+  user_id: string;
+  github_project_id: string;
+  branch: string;
+  base_branch: string;
+  thread_id: string | null;
+  sandbox_id: string | null;
+  sandbox_workdir: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+function toSession(db: SessionDbRow): GithubSessionRow {
+  return {
+    id: db.id,
+    orgId: db.org_id,
+    userId: db.user_id,
+    githubProjectId: db.github_project_id,
+    branch: db.branch,
+    baseBranch: db.base_branch,
+    threadId: db.thread_id,
+    sandboxId: db.sandbox_id,
+    sandboxWorkdir: db.sandbox_workdir,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
   };
 }
 
@@ -461,6 +513,70 @@ export class GithubStoragePG extends GithubStorage {
       userId,
       branch,
     ]);
+  }
+
+  // ── Sessions ──────────────────────────────────────────────────────────────
+
+  async createSession(input: CreateGithubSessionInput): Promise<GithubSessionRow> {
+    const { rows } = await this.#db.query<SessionDbRow>(
+      `INSERT INTO github_sessions
+         (org_id, user_id, github_project_id, branch, base_branch, thread_id, sandbox_workdir)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (github_project_id, user_id, branch) DO UPDATE SET
+         base_branch = EXCLUDED.base_branch,
+         updated_at = now()
+       RETURNING *`,
+      [
+        input.orgId,
+        input.userId,
+        input.githubProjectId,
+        input.branch,
+        input.baseBranch,
+        input.threadId ?? null,
+        input.sandboxWorkdir ?? null,
+      ],
+    );
+    return toSession(rows[0]!);
+  }
+
+  async getSession(id: string): Promise<GithubSessionRow | null> {
+    const { rows } = await this.#db.query<SessionDbRow>('SELECT * FROM github_sessions WHERE id = $1', [id]);
+    return rows[0] ? toSession(rows[0]) : null;
+  }
+
+  async getSessionForBranch(
+    githubProjectId: string,
+    userId: string,
+    branch: string,
+  ): Promise<GithubSessionRow | null> {
+    const { rows } = await this.#db.query<SessionDbRow>(
+      'SELECT * FROM github_sessions WHERE github_project_id = $1 AND user_id = $2 AND branch = $3',
+      [githubProjectId, userId, branch],
+    );
+    return rows[0] ? toSession(rows[0]) : null;
+  }
+
+  async listSessions(githubProjectId: string, userId: string): Promise<GithubSessionRow[]> {
+    const { rows } = await this.#db.query<SessionDbRow>(
+      'SELECT * FROM github_sessions WHERE github_project_id = $1 AND user_id = $2 ORDER BY created_at DESC',
+      [githubProjectId, userId],
+    );
+    return rows.map(toSession);
+  }
+
+  async setSessionThread(id: string, threadId: string | null): Promise<void> {
+    await this.#db.query('UPDATE github_sessions SET thread_id = $2, updated_at = now() WHERE id = $1', [id, threadId]);
+  }
+
+  async setSessionSandbox(id: string, sandboxId: string | null, sandboxWorkdir: string | null): Promise<void> {
+    await this.#db.query(
+      'UPDATE github_sessions SET sandbox_id = $2, sandbox_workdir = $3, updated_at = now() WHERE id = $1',
+      [id, sandboxId, sandboxWorkdir],
+    );
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    await this.#db.query('DELETE FROM github_sessions WHERE id = $1', [id]);
   }
 
   // ── PR signal subscriptions ───────────────────────────────────────────────

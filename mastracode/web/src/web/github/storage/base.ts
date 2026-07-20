@@ -82,6 +82,21 @@ export interface GithubWorktreeRow {
   createdAt: Date;
 }
 
+/** A Web-owned, session-scoped GitHub workspace checkout. */
+export interface GithubSessionRow {
+  id: string;
+  orgId: string;
+  userId: string;
+  githubProjectId: string;
+  branch: string;
+  baseBranch: string;
+  threadId: string | null;
+  sandboxId: string | null;
+  sandboxWorkdir: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export type GithubSignalSubscriptionSource = 'auto-gh-pr-create' | 'factory-pr-create' | 'explicit-tool';
 export type GithubSignalSubscriptionStatus = 'open' | 'closed' | 'merged';
 
@@ -134,6 +149,16 @@ export interface UpsertGithubWorktreeInput {
   branch: string;
   baseBranch: string;
   worktreePath: string;
+}
+
+export interface CreateGithubSessionInput {
+  orgId: string;
+  userId: string;
+  githubProjectId: string;
+  branch: string;
+  baseBranch: string;
+  threadId?: string | null;
+  sandboxWorkdir?: string | null;
 }
 
 export interface SubscribeToPullRequestInput {
@@ -236,6 +261,16 @@ export abstract class GithubStorage implements FactoryStorageDomain {
     worktreePath: string,
   ): Promise<GithubWorktreeRow | null>;
   abstract deleteWorktree(githubProjectId: string, userId: string, branch: string): Promise<void>;
+
+  // ── Sessions ──────────────────────────────────────────────────────────────
+
+  abstract createSession(input: CreateGithubSessionInput): Promise<GithubSessionRow>;
+  abstract getSession(id: string): Promise<GithubSessionRow | null>;
+  abstract getSessionForBranch(githubProjectId: string, userId: string, branch: string): Promise<GithubSessionRow | null>;
+  abstract listSessions(githubProjectId: string, userId: string): Promise<GithubSessionRow[]>;
+  abstract setSessionThread(id: string, threadId: string | null): Promise<void>;
+  abstract setSessionSandbox(id: string, sandboxId: string | null, sandboxWorkdir: string | null): Promise<void>;
+  abstract deleteSession(id: string): Promise<void>;
 
   // ── PR signal subscriptions ───────────────────────────────────────────────
 

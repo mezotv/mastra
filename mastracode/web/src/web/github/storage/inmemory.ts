@@ -9,9 +9,11 @@ import { randomUUID } from 'node:crypto';
 import type { FactoryStorageContext } from '../../storage/domain';
 import { GithubStorage, normalizedSessionScope } from './base';
 import type {
+  CreateGithubSessionInput,
   GithubInstallationRow,
   GithubProjectRow,
   GithubProjectSandboxRow,
+  GithubSessionRow,
   GithubSignalSubscriptionRow,
   GithubSignalSubscriptionStatus,
   GithubWebhookPullRequestTarget,
@@ -30,6 +32,7 @@ export class GithubStorageInMemory extends GithubStorage {
   projects: GithubProjectRow[] = [];
   sandboxes: GithubProjectSandboxRow[] = [];
   worktrees: GithubWorktreeRow[] = [];
+  sessions: GithubSessionRow[] = [];
   subscriptions: GithubSignalSubscriptionRow[] = [];
 
   async init(_ctx: FactoryStorageContext): Promise<void> {
@@ -172,6 +175,73 @@ export class GithubStorageInMemory extends GithubStorage {
       row => !(row.githubProjectId === githubProjectId && row.userId === userId && row.branch === branch),
     );
     this.worktrees.splice(0, this.worktrees.length, ...retained);
+  }
+
+  // ── Sessions ──────────────────────────────────────────────────────────────
+
+  async createSession(input: CreateGithubSessionInput): Promise<GithubSessionRow> {
+    const existing = await this.getSessionForBranch(input.githubProjectId, input.userId, input.branch);
+    if (existing) {
+      existing.baseBranch = input.baseBranch;
+      existing.updatedAt = new Date();
+      return existing;
+    }
+    const created: GithubSessionRow = {
+      id: randomUUID(),
+      orgId: input.orgId,
+      userId: input.userId,
+      githubProjectId: input.githubProjectId,
+      branch: input.branch,
+      baseBranch: input.baseBranch,
+      threadId: input.threadId ?? null,
+      sandboxId: null,
+      sandboxWorkdir: input.sandboxWorkdir ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.sessions.push(created);
+    return created;
+  }
+
+  async getSession(id: string): Promise<GithubSessionRow | null> {
+    return this.sessions.find(row => row.id === id) ?? null;
+  }
+
+  async getSessionForBranch(
+    githubProjectId: string,
+    userId: string,
+    branch: string,
+  ): Promise<GithubSessionRow | null> {
+    return (
+      this.sessions.find(row => row.githubProjectId === githubProjectId && row.userId === userId && row.branch === branch) ??
+      null
+    );
+  }
+
+  async listSessions(githubProjectId: string, userId: string): Promise<GithubSessionRow[]> {
+    return this.sessions.filter(row => row.githubProjectId === githubProjectId && row.userId === userId);
+  }
+
+  async setSessionThread(id: string, threadId: string | null): Promise<void> {
+    const row = await this.getSession(id);
+    if (row) {
+      row.threadId = threadId;
+      row.updatedAt = new Date();
+    }
+  }
+
+  async setSessionSandbox(id: string, sandboxId: string | null, sandboxWorkdir: string | null): Promise<void> {
+    const row = await this.getSession(id);
+    if (row) {
+      row.sandboxId = sandboxId;
+      row.sandboxWorkdir = sandboxWorkdir;
+      row.updatedAt = new Date();
+    }
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    const retained = this.sessions.filter(row => row.id !== id);
+    this.sessions.splice(0, this.sessions.length, ...retained);
   }
 
   // ── PR signal subscriptions ───────────────────────────────────────────────

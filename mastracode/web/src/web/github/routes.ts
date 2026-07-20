@@ -11,6 +11,8 @@
  * so the SPA can cleanly hide all GitHub UI.
  */
 
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
 import type { MountedMastraCode } from '@mastra/code-sdk';
 import type { ApiRoute } from '@mastra/core/server';
 import { registerApiRoute } from '@mastra/core/server';
@@ -40,6 +42,7 @@ import { withProjectLock } from './project-lock';
 import { handleGithubWebhook } from './webhook';
 import type { GithubIssueTriageRunInput, GithubIssueTriageRunResult } from './webhook';
 import {
+  computeLocalSessionSandboxWorkdir,
   computeSandboxWorkdir,
   getSandboxProvider,
   isSandboxEnabled,
@@ -63,7 +66,7 @@ import {
   WorktreeError,
 } from './sandbox';
 import type { GitIdentity } from './sandbox';
-import type { GithubProjectRow, GithubProjectSandboxRow } from './storage/base';
+import type { GithubProjectRow, GithubProjectSandboxRow, GithubSessionRow } from './storage/base';
 
 export interface MountGithubRoutesOptions {
   /**
@@ -788,8 +791,8 @@ export function buildGithubRoutes(options: MountGithubRoutesOptions = {}): ApiRo
     }),
   );
 
-  // ── Worktree / branch / commit / push / PR ──────────────────────────────
-  routes.push(...buildProjectGitRoutes(github));
+  // ── Session / worktree / branch / commit / push / PR ─────────────────────
+  routes.push(...buildProjectGitRoutes(github, options.controller));
 
   return routes;
 }
@@ -957,8 +960,247 @@ async function loadOwnedProject(
   return { orgId, userId, project, sandboxRow };
 }
 
-function buildProjectGitRoutes(github: GithubIntegration): ApiRoute[] {
+type ControllerSession = Awaited<ReturnType<MountedMastraCode['controller']['createSession']>>;
+
+function ownerIdForSession(session: ControllerSession): string {
+  return session.identity.getOwnerId();
+}
+
+function serializeGithubSession(row: GithubSessionRow, project: GithubProjectRow) {
+  return {
+    id: row.id,
+    resourceId: project.id,
+    scope: row.id,
+    githubProjectId: row.githubProjectId,
+    branch: row.branch,
+    baseBranch: row.baseBranch,
+    threadId: row.threadId,
+    sandboxId: row.sandboxId,
+    sandboxWorkdir: row.sandboxWorkdir,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function ensureGithubControllerSession({
+  c,
+  github,
+  controller,
+  project,
+  userId,
+  sessionRow,
+}: {
+  c: RouteContext;
+  github: GithubIntegration;
+  controller: MountedMastraCode['controller'];
+  project: GithubProjectRow;
+  userId: string;
+  sessionRow: GithubSessionRow;
+}) {
+  const session = await controller.createSession({
+    id: `${project.id}::${sessionRow.id}`,
+    ownerId: userId,
+    resourceId: project.id,
+    scope: sessionRow.id,
+    tags: {
+      sessionId: sessionRow.id,
+      githubProjectId: project.id,
+      branch: sessionRow.branch,
+      baseBranch: sessionRow.baseBranch,
+    },
+    requestContext: c.get('requestContext'),
+  });
+  const ownerId = ownerIdForSession(session);
+  if (ownerId !== userId) {
+    throw new Error(`GitHub session owner mismatch for ${project.id}:${sessionRow.id}`);
+  }
+  const threadId = session.thread.getId();
+  if (threadId && threadId !== sessionRow.threadId) {
+    await github.storageDomain.setSessionThread(sessionRow.id, threadId);
+    sessionRow.threadId = threadId;
+  }
+  return serializeGithubSession(sessionRow, project);
+}
+
+async function loadOwnedGithubProject(
+  github: GithubIntegration,
+  c: RouteContext,
+): Promise<{ orgId: string; userId: string; project: GithubProjectRow } | { response: Response }> {
+  const resolved = await resolveOrgTenant(c);
+  if ('response' in resolved) return { response: resolved.response };
+  const { orgId, userId } = resolved.tenant;
+  const projectId = c.req.param('id');
+  if (!projectId) return { response: c.json({ error: 'Repository not found' }, 404) };
+  const project = await github.storageDomain.getOrgProject(orgId, projectId);
+  if (!project) return { response: c.json({ error: 'Repository not found' }, 404) };
+  return { orgId, userId, project };
+}
+
+async function loadGithubSession({
+  github,
+  project,
+  userId,
+  sessionId,
+}: {
+  github: GithubIntegration;
+  project: GithubProjectRow;
+  userId: string;
+  sessionId: string;
+}): Promise<GithubSessionRow | null> {
+  const session = await github.storageDomain.getSession(sessionId);
+  if (!session || session.githubProjectId !== project.id || session.userId !== userId) return null;
+  return session;
+}
+
+function githubSessionErrorResponse(c: RouteContext, error: unknown): Response {
+  if (error instanceof Error && error.message.includes('owner mismatch')) {
+    return c.json({ error: 'session_owner_mismatch', message: 'GitHub session owner mismatch.' }, 409);
+  }
+  return gitErrorResponse(c, error);
+}
+
+function buildProjectGitRoutes(github: GithubIntegration, controller?: MountedMastraCode['controller']): ApiRoute[] {
   return [
+    // ── List Web-owned GitHub sessions for this project ─────────────────────
+    registerApiRoute('/web/github/projects/:id/sessions', {
+      method: 'GET',
+      requiresAuth: false,
+      handler: async c => {
+        const owned = await loadOwnedGithubProject(github, loose(c));
+        if ('response' in owned) return owned.response;
+        const { userId, project } = owned;
+        const sessions = await github.storageDomain.listSessions(project.id, userId);
+        return c.json({ sessions: sessions.map(session => serializeGithubSession(session, project)) });
+      },
+    }),
+
+    // ── Create / reuse a Web-owned GitHub session ───────────────────────────
+    registerApiRoute('/web/github/projects/:id/sessions', {
+      method: 'POST',
+      requiresAuth: false,
+      handler: async c => {
+        const owned = await loadOwnedGithubProject(github, loose(c));
+        if ('response' in owned) return owned.response;
+        if (!isSandboxEnabled()) {
+          return c.json({ error: 'sandbox_not_configured', message: 'No sandbox provider is configured.' }, 503);
+        }
+        if (!controller) return c.json({ error: 'controller_unavailable' }, 503);
+        const { orgId, userId, project } = owned;
+
+        let body: { branch?: unknown; baseBranch?: unknown };
+        try {
+          body = await c.req.json();
+        } catch {
+          return c.json({ error: 'Invalid JSON body' }, 400);
+        }
+        const branch = body.branch === undefined ? `user/${randomUUID()}` : body.branch;
+        if (!isValidGitRefSandbox(branch)) {
+          return c.json({ error: 'Invalid branch' }, 400);
+        }
+        const baseBranch = body.baseBranch === undefined ? project.defaultBranch : body.baseBranch;
+        if (!isValidGitRefSandbox(baseBranch)) {
+          return c.json({ error: 'Invalid baseBranch' }, 400);
+        }
+
+        try {
+          return await withProjectLock(`${project.id}:${userId}:${branch}`, async () => {
+            const existing = await github.storageDomain.getSessionForBranch(project.id, userId, branch);
+            const sessionRow =
+              existing ??
+              (await github.storageDomain.createSession({
+                orgId,
+                userId,
+                githubProjectId: project.id,
+                branch,
+                baseBranch,
+                sandboxWorkdir: project.sandboxWorkdir,
+              }));
+            const session = await ensureGithubControllerSession({
+              c: loose(c),
+              github,
+              controller,
+              project,
+              userId,
+              sessionRow,
+            });
+
+            if (!existing) {
+              await emitAudit(loose(c), {
+                action: 'factory.worktree.created',
+                projectId: project.id,
+                targets: [{ type: 'session', id: session.id, name: branch }],
+                metadata: { sessionId: session.id, branch, baseBranch },
+              });
+            }
+
+            return c.json(session, existing ? 200 : 201);
+          });
+        } catch (err) {
+          return githubSessionErrorResponse(loose(c), err);
+        }
+      },
+    }),
+
+    // ── Read a Web-owned GitHub session ─────────────────────────────────────
+    registerApiRoute('/web/github/projects/:id/sessions/:sessionId', {
+      method: 'GET',
+      requiresAuth: false,
+      handler: async c => {
+        const owned = await loadOwnedGithubProject(github, loose(c));
+        if ('response' in owned) return owned.response;
+        const { userId, project } = owned;
+        const sessionRow = await loadGithubSession({ github, project, userId, sessionId: c.req.param('sessionId') });
+        if (!sessionRow) return c.json({ error: 'Session not found' }, 404);
+        return c.json(serializeGithubSession(sessionRow, project));
+      },
+    }),
+
+    // ── Delete a Web-owned GitHub session ───────────────────────────────────
+    registerApiRoute('/web/github/projects/:id/sessions/:sessionId', {
+      method: 'DELETE',
+      requiresAuth: false,
+      handler: async c => {
+        const owned = await loadOwnedGithubProject(github, loose(c));
+        if ('response' in owned) return owned.response;
+        const { userId, project } = owned;
+        const sessionId = c.req.param('sessionId');
+        const sessionRow = await loadGithubSession({ github, project, userId, sessionId });
+        if (!sessionRow) return c.json({ error: 'Session not found' }, 404);
+
+        try {
+          return await withProjectLock(`${project.id}:${userId}:${sessionId}`, async () => {
+            const localWorkdir =
+              getSandboxProvider() === 'local'
+                ? computeLocalSessionSandboxWorkdir(project.repoFullName, sessionRow.id)
+                : undefined;
+            if (sessionRow.sandboxId) {
+              try {
+                const sandbox = localWorkdir
+                  ? await reattachSandbox(sessionRow.sandboxId, { workingDirectory: localWorkdir })
+                  : await reattachSandbox(sessionRow.sandboxId);
+                await sandbox.stop?.();
+              } catch {
+                // Best-effort teardown: the provider may already have removed the sandbox.
+              }
+            }
+            if (localWorkdir) {
+              await fs.rm(localWorkdir, { recursive: true, force: true });
+            }
+            await github.storageDomain.deleteSession(sessionId);
+            await emitAudit(loose(c), {
+              action: 'factory.worktree.deleted',
+              projectId: project.id,
+              targets: [{ type: 'session', id: sessionId, name: sessionRow.branch }],
+              metadata: { sessionId, branch: sessionRow.branch },
+            });
+            return c.json({ deleted: true, id: sessionId });
+          });
+        } catch (err) {
+          return gitErrorResponse(loose(c), err);
+        }
+      },
+    }),
+
     // ── Create / reuse a worktree + feature branch ──────────────────────────
     registerApiRoute('/web/github/repositories/:id/worktree', {
       method: 'POST',

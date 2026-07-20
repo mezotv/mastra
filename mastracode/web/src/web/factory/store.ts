@@ -91,11 +91,11 @@ function sanitizeSessions(value: unknown): Record<string, WorkItemSessionInput> 
   for (const [role, ref] of entries) {
     if (!/^[a-z0-9][a-z0-9_-]*$/i.test(role) || role.length > MAX_ROLE_LENGTH) return undefined;
     if (!isPlainObject(ref)) return undefined;
-    const { projectPath, branch, threadId } = ref as Record<string, unknown>;
-    for (const field of [projectPath, branch, threadId]) {
+    const { sessionId, branch, threadId } = ref as Record<string, unknown>;
+    for (const field of [sessionId, branch, threadId]) {
       if (typeof field !== 'string' || field.length === 0 || field.length > MAX_SESSION_FIELD_LENGTH) return undefined;
     }
-    sessions[role] = { projectPath: projectPath as string, branch: branch as string, threadId: threadId as string };
+    sessions[role] = { sessionId: sessionId as string, branch: branch as string, threadId: threadId as string };
   }
   return sessions;
 }

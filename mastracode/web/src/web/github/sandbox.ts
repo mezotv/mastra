@@ -131,6 +131,7 @@ export async function materializeRepo(
   token: string,
   storage: GithubStorage,
   onProgress?: ProgressFn,
+  markMaterialized?: () => Promise<void>,
 ): Promise<void> {
   const workdir = sandboxRow.sandboxWorkdir;
   const repo = repoInfo.repoFullName;
@@ -203,7 +204,7 @@ export async function materializeRepo(
 
   // 4. Mark materialized.
   reportProgress(onProgress, { phase: 'finalizing', message: 'Finalizing workspace…' });
-  await storage.markSandboxMaterialized(sandboxRow.id);
+  await (markMaterialized ?? (() => storage.markSandboxMaterialized(sandboxRow.id)))();
 }
 
 /**
@@ -574,6 +575,59 @@ export async function ensureWorktree(
   }
 
   return { worktreePath, branch, baseBranch, reused: false };
+}
+
+/** Check out the branch owned by a Web GitHub session inside its session checkout. */
+export async function checkoutSessionBranch(
+  sandbox: MaterializationSandbox,
+  workdir: string,
+  {
+    branch,
+    baseBranch,
+    token,
+    repoFullName,
+  }: { branch: string; baseBranch: string; token: string; repoFullName: string },
+): Promise<void> {
+  if (!isValidGitRef(branch)) {
+    throw new WorktreeError(`Invalid branch name '${branch}'.`, 'invalid-branch');
+  }
+  if (!isValidGitRef(baseBranch)) {
+    throw new WorktreeError(`Invalid base branch name '${baseBranch}'.`, 'invalid-branch');
+  }
+
+  await withInstallToken(sandbox, workdir, repoFullName, token, async () => {
+    const fetchBase = await sh(
+      sandbox,
+      `git -C ${shellQuote(workdir)} fetch origin ${shellQuote(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`)}`,
+    );
+    if (fetchBase.exitCode !== 0) {
+      throw classifyGitFailure(fetchBase, 'pull-failed');
+    }
+
+    const remoteBranch = await sh(sandbox, `git -C ${shellQuote(workdir)} ls-remote --exit-code --heads origin ${shellQuote(branch)}`);
+    if (remoteBranch.exitCode === 0) {
+      const fetchBranch = await sh(
+        sandbox,
+        `git -C ${shellQuote(workdir)} fetch origin ${shellQuote(`+refs/heads/${branch}:refs/remotes/origin/${branch}`)}`,
+      );
+      if (fetchBranch.exitCode !== 0) {
+        throw classifyGitFailure(fetchBranch, 'pull-failed');
+      }
+      const checkoutRemote = await sh(sandbox, `git -C ${shellQuote(workdir)} checkout -B ${shellQuote(branch)} ${shellQuote(`origin/${branch}`)}`);
+      if (checkoutRemote.exitCode !== 0) {
+        throw new WorktreeError(`git checkout failed: ${checkoutRemote.stderr.trim() || checkoutRemote.stdout.trim()}`, 'worktree-failed');
+      }
+      return;
+    }
+    if (remoteBranch.exitCode !== 2) {
+      throw classifyGitFailure(remoteBranch, 'pull-failed');
+    }
+
+    const checkoutBase = await sh(sandbox, `git -C ${shellQuote(workdir)} checkout -B ${shellQuote(branch)} ${shellQuote(`origin/${baseBranch}`)}`);
+    if (checkoutBase.exitCode !== 0) {
+      throw new WorktreeError(`git checkout failed: ${checkoutBase.stderr.trim() || checkoutBase.stdout.trim()}`, 'worktree-failed');
+    }
+  });
 }
 
 /**

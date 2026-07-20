@@ -4,14 +4,67 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDynamicWorkspace } from '@mastra/code-sdk/agents/workspace';
 import { RequestContext } from '@mastra/core/request-context';
-import type { LocalFilesystem } from '@mastra/core/workspace';
-import { afterEach, describe, expect, it } from 'vitest';
-import { getFactoryWorkspace } from './workspace.js';
+import { LocalSandbox, type LocalFilesystem } from '@mastra/core/workspace';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  projects: [] as any[],
+  sessions: [] as any[],
+  updates: [] as Array<{ set: Record<string, unknown>; where: unknown }>,
+  ensureSandbox: vi.fn(async () => ({
+    id: 'sandbox-1',
+    start: vi.fn(async () => {}),
+    getInfo: vi.fn(async () => ({ metadata: { sandboxId: 'sandbox-1' } })),
+    executeCommand: vi.fn(async () => ({ exitCode: 0, stdout: '', stderr: '' })),
+  })),
+  materializeRepo: vi.fn(
+    async (
+      _session: unknown,
+      _project: unknown,
+      _sandbox: unknown,
+      _token: string,
+      _storage: unknown,
+      _progress: unknown,
+      markMaterialized?: () => Promise<void>,
+    ) => {
+      await markMaterialized?.();
+    },
+  ),
+  checkoutSessionBranch: vi.fn(async () => {}),
+  runWorktreeSetup: vi.fn(async () => {}),
+  mintInstallationToken: vi.fn(async () => 'gh-token'),
+}));
+
+vi.mock('../github/sandbox', () => ({
+  materializeRepo: (...args: unknown[]) => (mocks.materializeRepo as any)(...args),
+  checkoutSessionBranch: (...args: unknown[]) => (mocks.checkoutSessionBranch as any)(...args),
+  runWorktreeSetup: (...args: unknown[]) => (mocks.runWorktreeSetup as any)(...args),
+}));
+
+vi.mock('../sandbox/fleet', async importOriginal => {
+  const actual = await importOriginal<typeof import('../sandbox/fleet')>();
+  return {
+    ...actual,
+    ensureSandbox: (...args: unknown[]) => (mocks.ensureSandbox as any)(...args),
+  };
+});
+
+import { __resetRuntimeConfigForTests, seedRuntimeConfig } from '../runtime-config';
+import { checkpointNameForSession, createWorkspaceFactory, getFactoryWorkspace } from './workspace.js';
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(tempDir => fs.rm(tempDir, { recursive: true, force: true })));
+  mocks.projects.splice(0);
+  mocks.sessions.splice(0);
+  mocks.updates.splice(0);
+  mocks.ensureSandbox.mockClear();
+  mocks.materializeRepo.mockClear();
+  mocks.checkoutSessionBranch.mockClear();
+  mocks.runWorktreeSetup.mockClear();
+  mocks.mintInstallationToken.mockClear();
+  __resetRuntimeConfigForTests();
 });
 
 function createRequestContext(projectPath: string) {
@@ -24,12 +77,104 @@ function createRequestContext(projectPath: string) {
   requestContext.set('controller', {
     modeId: 'build',
     getState,
-    session: { state: { get: getState } },
+    session: { id: 'local-session', state: { get: getState } },
   });
   return requestContext;
 }
 
+function createGithubRequestContext(projectId: string, sessionId: string) {
+  const requestContext = createRequestContext('/unused');
+  requestContext.set('controller', {
+    modeId: 'build',
+    resourceId: projectId,
+    scope: sessionId,
+    session: { id: `${projectId}::${sessionId}` },
+  });
+  requestContext.set('user', { organizationId: 'org-1', workosId: 'user-1' });
+  return requestContext;
+}
+
+function createUnscopedGithubRequestContext(projectId: string, projectPath: string) {
+  const requestContext = createRequestContext(projectPath);
+  const getState = () => ({
+    projectPath,
+    homeDir: projectPath,
+    sandboxAllowedPaths: [],
+  });
+  requestContext.set('controller', {
+    modeId: 'build',
+    resourceId: projectId,
+    getState,
+    session: { id: projectId, state: { get: getState } },
+  });
+  requestContext.set('user', { organizationId: 'org-1', workosId: 'user-1' });
+  return requestContext;
+}
+
+function addProject(overrides: Record<string, unknown> = {}) {
+  const project = {
+    id: 'project-1',
+    orgId: 'org-1',
+    userId: 'creator-1',
+    installationId: 123,
+    repoFullName: 'octocat/hello',
+    repoId: 456,
+    defaultBranch: 'main',
+    sandboxProvider: 'local',
+    sandboxWorkdir: '/workspace/octocat/hello',
+    setupCommand: null,
+    createdAt: new Date(),
+    ...overrides,
+  };
+  mocks.projects.push(project);
+  return project;
+}
+
+function addSession(overrides: Record<string, unknown> = {}) {
+  const session = {
+    id: 'session-1',
+    orgId: 'org-1',
+    userId: 'user-1',
+    githubProjectId: 'project-1',
+    branch: 'feature-a',
+    baseBranch: 'main',
+    threadId: 'thread-1',
+    sandboxId: null,
+    sandboxWorkdir: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+  mocks.sessions.push(session);
+  return session;
+}
+
+function fakeGithubIntegration() {
+  return {
+    id: 'github',
+    mintInstallationToken: (...args: unknown[]) => mocks.mintInstallationToken(...(args as [])),
+    getInstallationOctokit: vi.fn(),
+    storageDomain: {
+      getOrgProject: vi.fn(async (orgId: string, projectId: string) =>
+        mocks.projects.find(project => project.orgId === orgId && project.id === projectId) ?? null,
+      ),
+      getSession: vi.fn(async (id: string) => mocks.sessions.find(session => session.id === id) ?? null),
+      setSessionSandbox: vi.fn(async (id: string, sandboxId: string | null, sandboxWorkdir: string | null) => {
+        const session = mocks.sessions.find(row => row.id === id);
+        if (session) Object.assign(session, { sandboxId, sandboxWorkdir, updatedAt: new Date() });
+        mocks.updates.push({ set: { sandboxId, sandboxWorkdir }, where: { id } });
+      }),
+    },
+  };
+}
+
 describe('getFactoryWorkspace', () => {
+  it('derives unique stable checkpoint names from session ids', () => {
+    expect(checkpointNameForSession('session-a')).toBe('mastracode-session-session-a');
+    expect(checkpointNameForSession('session-b')).toBe('mastracode-session-session-b');
+    expect(checkpointNameForSession('session-a')).not.toBe(checkpointNameForSession('session-b'));
+  });
+
   it('keeps Factory and default workspace cache identities separate', async () => {
     const projectPath = await fs.mkdtemp(path.join(os.tmpdir(), 'mastracode-web-factory-cache-'));
     tempDirs.push(projectPath);
@@ -84,5 +229,114 @@ describe('getFactoryWorkspace', () => {
       name: 'PermissionError',
       code: 'EACCES',
     });
+  });
+});
+
+describe('GitHub session workspace preparation', () => {
+  async function createLocalFactory(rootPrefix = 'mastracode-web-local-sessions-') {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), rootPrefix));
+    tempDirs.push(root);
+    const machine = new LocalSandbox({ workingDirectory: root });
+    seedRuntimeConfig({ sandbox: { machine, workdirBase: root }, integrations: [fakeGithubIntegration() as any] });
+    return { root, workspace: createWorkspaceFactory({ machine, workdir: root }) };
+  }
+
+  it('prepares distinct local session checkouts and branches through the factory', async () => {
+    const { root, workspace } = await createLocalFactory();
+    addProject({ setupCommand: 'pnpm i' });
+    addSession({ id: 'session-a', branch: 'feature-a' });
+    addSession({ id: 'session-b', branch: 'feature-b' });
+
+    const workspaceA = await workspace({ requestContext: createGithubRequestContext('project-1', 'session-a') });
+    const workspaceB = await workspace({ requestContext: createGithubRequestContext('project-1', 'session-b') });
+
+    const workdirA = path.join(root, 'github-sessions', 'octocat', 'hello', 'session-a');
+    const workdirB = path.join(root, 'github-sessions', 'octocat', 'hello', 'session-b');
+    expect(workspaceA.id).toContain('project-1-session-a');
+    expect(workspaceB.id).toContain('project-1-session-b');
+    expect(mocks.ensureSandbox).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Object),
+      { GH_TOKEN: 'gh-token' },
+      undefined,
+      { workingDirectory: workdirA },
+    );
+    expect(mocks.ensureSandbox).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Object),
+      { GH_TOKEN: 'gh-token' },
+      undefined,
+      { workingDirectory: workdirB },
+    );
+    expect(mocks.materializeRepo).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ id: 'session-a', sandboxWorkdir: workdirA }),
+      expect.objectContaining({ repoFullName: 'octocat/hello' }),
+      expect.any(Object),
+      'gh-token',
+      expect.any(Object),
+      undefined,
+      expect.any(Function),
+    );
+    expect(mocks.checkoutSessionBranch).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Object),
+      workdirB,
+      expect.objectContaining({ branch: 'feature-b', baseBranch: 'main' }),
+    );
+    expect(mocks.runWorktreeSetup).toHaveBeenCalledTimes(2);
+    expect(mocks.sessions.find(session => session.id === 'session-a')?.sandboxWorkdir).toBe(workdirA);
+    expect(mocks.sessions.find(session => session.id === 'session-b')?.sandboxWorkdir).toBe(workdirB);
+  });
+
+  it('reuses an already registered workspace for the exact GitHub session', async () => {
+    const { workspace } = await createLocalFactory();
+    addProject();
+    addSession({ id: 'session-a' });
+    const existing = { id: 'existing', setToolsConfig: vi.fn() };
+
+    const result = await workspace({
+      requestContext: createGithubRequestContext('project-1', 'session-a'),
+      mastra: { getWorkspaceById: vi.fn(() => existing) } as any,
+    });
+
+    expect(result).toBe(existing);
+    expect(existing.setToolsConfig).toHaveBeenCalled();
+    expect(mocks.ensureSandbox).not.toHaveBeenCalled();
+    expect(mocks.materializeRepo).not.toHaveBeenCalled();
+  });
+
+  it('enforces exact session scope ownership', async () => {
+    const { workspace } = await createLocalFactory();
+    addProject();
+    addSession({ id: 'session-a', userId: 'someone-else' });
+
+    await expect(workspace({ requestContext: createGithubRequestContext('project-1', 'session-a') })).rejects.toThrow(
+      /GitHub session session-a not found/,
+    );
+  });
+
+  it('keeps ordinary local-folder projects on the dynamic workspace resolver', async () => {
+    const { workspace } = await createLocalFactory();
+    const projectPath = await fs.mkdtemp(path.join(os.tmpdir(), 'mastracode-web-local-folder-'));
+    tempDirs.push(projectPath);
+
+    const result = await workspace({ requestContext: createRequestContext(projectPath) });
+
+    expect(result.id).toBe(`mastra-code-workspace-${projectPath}-web-factory`);
+    expect(mocks.ensureSandbox).not.toHaveBeenCalled();
+  });
+
+  it('does not require a GitHub session scope for unscoped project-level requests', async () => {
+    const { workspace } = await createLocalFactory();
+    addProject();
+    const projectPath = await fs.mkdtemp(path.join(os.tmpdir(), 'mastracode-web-unscoped-github-'));
+    tempDirs.push(projectPath);
+
+    const result = await workspace({ requestContext: createUnscopedGithubRequestContext('project-1', projectPath) });
+
+    expect(result.id).toBe(`mastra-code-workspace-${projectPath}-web-factory`);
+    expect(mocks.ensureSandbox).not.toHaveBeenCalled();
+    expect(mocks.materializeRepo).not.toHaveBeenCalled();
   });
 });

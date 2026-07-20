@@ -25,13 +25,8 @@ import type { GithubStorage } from './github/storage/base.js';
 import { buildIntakeRoutes } from './intake/routes.js';
 import { getFactoryStore, getSeededStateSigner } from './runtime-config.js';
 import { getLinearFeatureDiagnostics, isLinearFeatureEnabled } from './linear/config.js';
-import { registerSandboxReattach } from './sandbox-reattach-registration.js';
 import { buildSkillRoutes } from './skills/routes.js';
 import type { StateSigner } from './state-signing.js';
-
-// Wire the core workspace seam to this package's sandbox provisioning as soon
-// as the web surface is loaded, so sandbox-backed workspaces can reattach.
-registerSandboxReattach();
 
 /** A registered integration paired with its factory-resolved readiness. */
 export interface IntegrationRegistration {

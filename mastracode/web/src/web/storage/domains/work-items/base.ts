@@ -23,13 +23,13 @@ export type WorkItemSource = 'github-issue' | 'github-pr' | 'linear-issue' | 'ma
 
 /** A session/thread attached to a work item, keyed by role (`work`, `review`, ...). */
 export interface WorkItemSessionRef {
-  /** Worktree path the scoped agent-controller session is keyed by. */
-  projectPath: string;
-  /** Feature branch the worktree checks out. */
+  /** GitHub session id the scoped agent-controller session is keyed by. */
+  sessionId: string;
+  /** Feature branch the session checks out. */
   branch: string;
   /** Agent-controller thread id for the role's conversation. */
   threadId: string;
-  /** WorkOS user id whose sandbox/worktree the session runs in. */
+  /** WorkOS user id whose session runs in. */
   startedBy: string;
 }
 
@@ -73,7 +73,7 @@ export interface WorkItemRow {
 
 /** Session ref as accepted from clients — `startedBy` is stamped server-side. */
 export interface WorkItemSessionInput {
-  projectPath: string;
+  sessionId: string;
   branch: string;
   threadId: string;
 }

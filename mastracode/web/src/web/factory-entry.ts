@@ -30,7 +30,7 @@ import { observeAgentGitAction } from './audit/agent-audit.js';
 import type { WebAuthAdapter } from './auth-adapter.js';
 import { buildAuthRoutes, createWebAuthGate } from './auth.js';
 import type { FactoryIntegration, IntegrationTools } from './factory-integration.js';
-import { getFactoryWorkspace } from './factory/workspace.js';
+import { createWorkspaceFactory } from './factory/workspace.js';
 import { parseCreatedPullRequest, subscribeCurrentSessionToPullRequest } from './github/session-subscriptions.js';
 import type { WorkspaceSandbox } from '@mastra/core/workspace';
 import { getSeededGithubIntegration, seedRuntimeConfig } from './runtime-config.js';
@@ -357,7 +357,7 @@ export class MastraFactory {
     // (and pool) for all users, separated by `resourceId` scoping.
     const prepared = await prepareAgentControllerMount({
       controllerId: CONTROLLER_ID,
-      workspace: getFactoryWorkspace,
+      workspace: createWorkspaceFactory(sandboxConfig),
       disableGithubSignals: true,
       ...(storage ? { storage } : {}),
       ...(vector ? { vector } : {}),
