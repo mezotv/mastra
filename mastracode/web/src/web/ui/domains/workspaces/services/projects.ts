@@ -1,8 +1,10 @@
 /**
  * Project model — a named binding to a filesystem path.
  *
- * Projects are persisted in localStorage so they survive page reloads. The
- * project's `resourceId` is resolved by the server from its path using the SAME
+ * Project metadata and UI preferences are persisted in localStorage so they
+ * survive page reloads. GitHub worktree liveness is server-authoritative; the
+ * local worktree list is only a synchronized cache. The project's `resourceId`
+ * is resolved by the server from its path using the SAME
  * logic the terminal app uses (`detectProject` + resourceId overrides), so a
  * project opened in the TUI and in the web app map to the same session and
  * therefore the same threads. Start in the TUI, continue on the web.
@@ -72,10 +74,9 @@ export interface Project {
   sandboxId?: string;
   sandboxWorkdir?: string;
   /**
-   * Workspaces (git worktrees) for a GitHub project: factory feature-branch
-   * worktrees created via "New workspace" plus `user/`-prefixed personal
-   * session worktrees, all branched from the repo's HEAD. The repo-root
-   * checkout is never listed. Absent/empty for local projects.
+   * Synchronized cache of the server-authoritative GitHub worktree records.
+   * Includes factory feature branches plus `user/`-prefixed personal sessions;
+   * the repo-root checkout is never listed. Absent/empty for local projects.
    */
   worktrees?: Worktree[];
   /**

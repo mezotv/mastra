@@ -1481,8 +1481,35 @@ describe('project settings routes', () => {
 describe('worktree route', () => {
   it('401s without an authenticated user', async () => {
     seedMaterializedProject();
-    const res = await postJson(buildApp(null), '/web/github/projects/p1/worktree', { branch: 'feat/x' });
-    expect(res.status).toBe(401);
+    const app = buildApp(null);
+    const create = await postJson(app, '/web/github/projects/p1/worktree', { branch: 'feat/x' });
+    const list = await app.request('/web/github/projects/p1/worktrees');
+    expect(create.status).toBe(401);
+    expect(list.status).toBe(401);
+  });
+
+  it("lists only the signed-in user's persisted worktrees", async () => {
+    seedMaterializedProject();
+    const app = buildApp({ workosId: 'u1' });
+    await postJson(app, '/web/github/projects/p1/worktree', { branch: 'feat/mine' });
+    await postJson(buildApp({ workosId: 'u2' }), '/web/github/projects/p1/worktree', { branch: 'feat/theirs' });
+    reattachSandbox.mockClear();
+    ensureWorktree.mockClear();
+
+    const res = await app.request('/web/github/projects/p1/worktrees');
+
+    expect(res.status).toBe(200);
+    expect(reattachSandbox).not.toHaveBeenCalled();
+    expect(ensureWorktree).not.toHaveBeenCalled();
+    expect(await res.json()).toEqual({
+      worktrees: [
+        {
+          branch: 'feat/mine',
+          baseBranch: 'main',
+          worktreePath: '/workspace/hello/../worktrees/feat/mine',
+        },
+      ],
+    });
   });
 
   it('503s when the sandbox is not configured', async () => {

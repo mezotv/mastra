@@ -895,10 +895,10 @@ export function buildGithubRoutes(options: MountGithubRoutesOptions = {}): ApiRo
 async function loadOrgProject(
   github: GithubIntegration,
   c: RouteContext,
-): Promise<{ project: GithubProjectRow } | { response: Response }> {
+): Promise<{ project: GithubProjectRow; userId: string } | { response: Response }> {
   const resolved = await resolveOrgTenant(c);
   if ('response' in resolved) return { response: resolved.response };
-  const { orgId } = resolved.tenant;
+  const { orgId, userId } = resolved.tenant;
 
   const projectId = c.req.param('id');
   if (!projectId) {
@@ -908,7 +908,7 @@ async function loadOrgProject(
   if (!project) {
     return { response: c.json({ error: 'Project not found' }, 404) };
   }
-  return { project };
+  return { project, userId };
 }
 
 /** Derive a commit/author identity from the authenticated WorkOS user. */
@@ -1058,6 +1058,24 @@ function buildProjectGitRoutes(
   }) => Promise<void>,
 ): ApiRoute[] {
   return [
+    // ── List the signed-in user's persisted worktrees ───────────────────────
+    registerApiRoute('/web/github/projects/:id/worktrees', {
+      method: 'GET',
+      requiresAuth: false,
+      handler: async c => {
+        const owned = await loadOrgProject(github, loose(c));
+        if ('response' in owned) return owned.response;
+        const rows = await github.storageDomain.listWorktrees(owned.project.id, owned.userId);
+        return c.json({
+          worktrees: rows.map(row => ({
+            branch: row.branch,
+            baseBranch: row.baseBranch,
+            worktreePath: row.worktreePath,
+          })),
+        });
+      },
+    }),
+
     // ── Create / reuse a worktree + feature branch ──────────────────────────
     registerApiRoute('/web/github/projects/:id/worktree', {
       method: 'POST',

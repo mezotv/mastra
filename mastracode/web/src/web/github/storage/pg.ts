@@ -554,6 +554,14 @@ export class GithubStoragePG extends GithubStorage {
     );
   }
 
+  async listWorktrees(githubProjectId: string, userId: string): Promise<GithubWorktreeRow[]> {
+    const { rows } = await this.#db.query<WorktreeDbRow>(
+      'SELECT * FROM github_worktrees WHERE github_project_id = $1 AND user_id = $2 ORDER BY created_at',
+      [githubProjectId, userId],
+    );
+    return rows.map(toWorktree);
+  }
+
   async getWorktree(githubProjectId: string, userId: string, branch: string): Promise<GithubWorktreeRow | null> {
     const { rows } = await this.#db.query<WorktreeDbRow>(
       'SELECT * FROM github_worktrees WHERE github_project_id = $1 AND user_id = $2 AND branch = $3',

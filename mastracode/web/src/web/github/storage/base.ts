@@ -270,6 +270,7 @@ export abstract class GithubStorage implements FactoryStorageDomain {
 
   /** Insert or, when `(project, user, branch)` exists, refresh base/path. */
   abstract upsertWorktree(input: UpsertGithubWorktreeInput): Promise<void>;
+  abstract listWorktrees(githubProjectId: string, userId: string): Promise<GithubWorktreeRow[]>;
   abstract getWorktree(githubProjectId: string, userId: string, branch: string): Promise<GithubWorktreeRow | null>;
   abstract findWorktreeByPath(
     githubProjectId: string,

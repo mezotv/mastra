@@ -183,6 +183,10 @@ export class GithubStorageInMemory extends GithubStorage {
     this.worktrees.push({ id: randomUUID(), createdAt: new Date(), ...input });
   }
 
+  async listWorktrees(githubProjectId: string, userId: string): Promise<GithubWorktreeRow[]> {
+    return this.worktrees.filter(row => row.githubProjectId === githubProjectId && row.userId === userId);
+  }
+
   async getWorktree(githubProjectId: string, userId: string, branch: string): Promise<GithubWorktreeRow | null> {
     return (
       this.worktrees.find(

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useApiConfig } from '../api/config';
 import { queryKeys } from '../api/keys';
 import { useToast } from '../../web/ui/ui/toast';
-import { createWorktree, deleteWorktree } from '../../web/ui/domains/workspaces/services/github';
+import { createWorktree, deleteWorktree, listWorktrees } from '../../web/ui/domains/workspaces/services/github';
 import type { Project, Worktree } from '../../web/ui/domains/workspaces/services/projects';
 import {
   factoryWorktrees,
@@ -11,6 +11,7 @@ import {
   removeWorktree,
   selectedWorktree,
   selectWorktree,
+  updateProject,
   upsertWorktree,
 } from '../../web/ui/domains/workspaces/services/projects';
 
@@ -70,15 +71,36 @@ function workspacesData(project: Project): WorkspacesData {
 }
 
 export function useWorkspacesQuery(project: Project | null | undefined) {
+  const { baseUrl } = useApiConfig();
+  const queryClient = useQueryClient();
   const githubProject = project?.source === 'github' ? project : undefined;
   return useQuery({
     queryKey: queryKeys.workspaces(project?.id),
     queryFn: async (): Promise<WorkspacesData> => {
-      if (!githubProject) throw new Error('Workspaces query requires a GitHub project');
-      return workspacesData(githubProject);
+      if (!githubProject?.githubProjectId) throw new Error('Workspaces query requires a GitHub project');
+      const current = latestProject(githubProject);
+      const persisted = await listWorktrees(baseUrl, githubProject.githubProjectId);
+      const localByPath = new Map((current.worktrees ?? []).map(worktree => [worktree.worktreePath, worktree]));
+      const worktrees = persisted.map(worktree => {
+        const threadId = localByPath.get(worktree.worktreePath)?.threadId;
+        return threadId ? { ...worktree, threadId } : worktree;
+      });
+      const selectedWorktreePath = worktrees.some(worktree => worktree.worktreePath === current.selectedWorktreePath)
+        ? current.selectedWorktreePath
+        : factoryWorktrees({ ...current, worktrees })[0]?.worktreePath;
+      const updated = { ...current, worktrees, selectedWorktreePath };
+      if (
+        current.selectedWorktreePath !== selectedWorktreePath ||
+        JSON.stringify(current.worktrees ?? []) !== JSON.stringify(worktrees)
+      ) {
+        updateProject(updated);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.userSessions(current.id) });
+      }
+      return workspacesData(updated);
     },
-    enabled: !!githubProject,
-    initialData: githubProject ? () => workspacesData(githubProject) : undefined,
+    enabled: !!githubProject?.githubProjectId,
+    refetchInterval: 3_000,
   });
 }
 

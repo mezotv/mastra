@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { server } from '../../../../../../e2e/web-ui/msw-server';
 import { renderWithProviders, TEST_BASE_URL } from '../../../../../../e2e/web-ui/render';
 import type { GithubStatus, Project } from '../../workspaces';
+import { loadProjects } from '../../workspaces/services/projects';
 import { createAppRoutes } from '../../../router';
 import { FactoryItemActions } from '../components/FactoryItemActions';
 import type { FactoryDecisionSummary } from '../services/decisions';
@@ -163,6 +164,8 @@ interface AppHandlerOptions {
   intakeConfig?: IntakeConfig;
   linearStatus?: LinearStatus;
   sessionThreadId?: string;
+  worktrees?: NonNullable<Project['worktrees']>;
+  onWorktreesRequest?: () => void;
 }
 
 function useAppHandlers(githubStatus: GithubStatus, options: AppHandlerOptions = {}) {
@@ -171,6 +174,15 @@ function useAppHandlers(githubStatus: GithubStatus, options: AppHandlerOptions =
     http.get(`${TEST_BASE_URL}/auth/me`, () => new Response(null, { status: 404 })),
     http.get(`${TEST_BASE_URL}/web/github/status`, () => HttpResponse.json(githubStatus)),
     http.get(`${TEST_BASE_URL}/web/github/subscriptions`, () => HttpResponse.json({ subscriptions: [] })),
+    http.get(`${TEST_BASE_URL}/web/github/projects/${GITHUB_PROJECT_ID}/worktrees`, () => {
+      options.onWorktreesRequest?.();
+      const project = loadProjects().find(candidate => candidate.githubProjectId === GITHUB_PROJECT_ID);
+      return HttpResponse.json({
+        worktrees:
+          options.worktrees ??
+          (project?.worktrees ?? []).filter(worktree => worktree.worktreePath !== project?.sandboxWorkdir),
+      });
+    }),
     http.get(`${TEST_BASE_URL}/web/intake/config`, () =>
       HttpResponse.json({ config: options.intakeConfig ?? defaultIntakeConfig }),
     ),
@@ -1053,6 +1065,61 @@ describe('Factory Board — persisted cards', () => {
     threadId: 'thread-work',
     startedBy: 'user-1',
   };
+
+  it('given a server-created Factory worktree absent from local storage, the card links to its active thread', async () => {
+    useBoardHandlers({
+      workItems: [
+        makeWorkItem({
+          id: 'wi-server-created',
+          title: 'Server-created investigation',
+          source: 'github-issue',
+          sourceKey: 'github-issue:41',
+          stages: ['triage'],
+          sessions: { triage: issueWorkSession },
+        }),
+      ],
+    });
+    renderAt('/factory/work', githubProject, connectedStatus, {
+      worktrees: [{ branch: 'factory/issue-12', worktreePath: issueWorktreePath, baseBranch: 'main' }],
+    });
+
+    const card = within(await screen.findByTestId('board-column-triage')).getByTestId('work-item-card');
+    expect(await within(card).findByRole('link', { name: /Server-created investigation/ })).toHaveAttribute(
+      'href',
+      '/threads/thread-work',
+    );
+  });
+
+  it('given only stale local worktree state, the server result keeps the card session inactive', async () => {
+    let worktreesRequested = false;
+    useBoardHandlers({
+      workItems: [
+        makeWorkItem({
+          id: 'wi-stale-local',
+          title: 'Stale local investigation',
+          source: 'github-issue',
+          sourceKey: 'github-issue:42',
+          stages: ['triage'],
+          sessions: { triage: issueWorkSession },
+        }),
+      ],
+    });
+
+    renderAt('/factory/work', projectWithIssueWorktree, connectedStatus, {
+      worktrees: [],
+      onWorktreesRequest: () => {
+        worktreesRequested = true;
+      },
+    });
+
+    await waitFor(() => {
+      expect(worktreesRequested).toBe(true);
+      expect(loadProjects()[0]?.worktrees).toEqual([]);
+    });
+    const card = within(await screen.findByTestId('board-column-triage')).getByTestId('work-item-card');
+    expect(within(card).queryByRole('link', { name: /Stale local investigation/ })).not.toBeInTheDocument();
+    expect(within(card).getByText('Stale local investigation').closest('button')).toBeInTheDocument();
+  });
 
   const reviewWorktreePath = '/sandbox/mastra/worktrees/factory-pr-34';
   const relatedWorkItems = [
