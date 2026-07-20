@@ -27,20 +27,6 @@ export interface WebAuthState {
 }
 
 /**
- * The user-session resourceId used when auth is disabled (local dev): there is
- * only one operator, so a fixed id keeps their sessions stable across reloads.
- */
-export const LOCAL_USER_RESOURCE_ID = 'local-user';
-
-/**
- * The resourceId under which a user's personal (non-factory) sessions live:
- * the stable WorkOS user id, or a fixed local id when auth is disabled.
- */
-export function userSessionResourceId(state: WebAuthState | undefined): string {
-  return state?.user?.userId ?? LOCAL_USER_RESOURCE_ID;
-}
-
-/**
  * Build the hosted-login URL. `returnTo` is where the server sends the user
  * after authenticating; it defaults to the current location so contexts that
  * are not `/signin` (which would loop back to itself) round-trip in place.

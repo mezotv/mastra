@@ -10,43 +10,44 @@ import {
 /** How often workspace activity is re-checked while the tab is focused. */
 export const WORKSPACE_ACTIVITY_POLL_MS = 5000;
 
-function isActiveWorkspaceThread(thread: AgentControllerThreadInfo, projectPath: string): boolean {
-  return thread.tags?.projectPath === projectPath && 'state' in thread && thread.state === 'active';
+function threadMatchesScope(thread: AgentControllerThreadInfo, sessionScope: string): boolean {
+  return thread.tags?.sessionId === sessionScope || thread.tags?.projectPath === sessionScope;
+}
+
+function isActiveWorkspaceThread(thread: AgentControllerThreadInfo, sessionScope: string): boolean {
+  return threadMatchesScope(thread, sessionScope) && 'state' in thread && thread.state === 'active';
 }
 
 interface WorkspaceActivityOptions {
   agentControllerId: string;
   resourceId: string;
-  /** The active worktree's path — the session scope the listing is read through. */
-  projectPath: string | undefined;
-  worktreePaths: string[];
+  /** The active session scope the listing is read through. */
+  sessionScope: string | undefined;
+  sessionScopes: string[];
   baseUrl?: string;
   enabled: boolean;
 }
 
 /**
  * The shared resource-wide thread listing behind the workspace hooks. Threads
- * are stamped with their worktree's `projectPath` tag and the server annotates
- * each with its run state (`active`/`idle`), so one poll covers every worktree
- * sharing the resourceId instead of a request per row.
+ * are stamped with their session id tag and the server annotates each with its
+ * run state (`active`/`idle`), so one poll covers every session sharing the
+ * resourceId instead of a request per row.
  */
 function useWorkspaceThreadsQuery({
   agentControllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   baseUrl,
   enabled,
-}: Omit<WorkspaceActivityOptions, 'worktreePaths'>): AgentControllerThreadInfo[] {
+}: Omit<WorkspaceActivityOptions, 'sessionScopes'>): AgentControllerThreadInfo[] {
   const query = useQuery({
     queryKey: queryKeys.agentControllerActivity(agentControllerId, resourceId),
     queryFn: async () => {
-      // A thread listing spans the whole resource regardless of session scope,
-      // so read through the already-live active-worktree session rather than
-      // seeding a new one.
       const { session } = createAgentControllerClient({
         agentControllerId,
         resourceId,
-        scope: projectPath,
+        scope: sessionScope,
         baseUrl,
       });
       return requireAgentControllerSession(session).listThreads();
@@ -58,16 +59,16 @@ function useWorkspaceThreadsQuery({
   return query.data ?? [];
 }
 
-/** Reports which workspaces have an agent run in flight, from a single thread listing. */
+/** Reports which sessions have an agent run in flight, from a single thread listing. */
 export function useWorkspaceActivity(options: WorkspaceActivityOptions): Record<string, boolean> {
   const threads = useWorkspaceThreadsQuery(options);
   return Object.fromEntries(
-    options.worktreePaths.map(path => [path, threads.some(thread => isActiveWorkspaceThread(thread, path))]),
+    options.sessionScopes.map(scope => [scope, threads.some(thread => isActiveWorkspaceThread(thread, scope))]),
   );
 }
 
 /**
- * A worktree's conversation thread: the most recent *titled* thread, falling
+ * A session's conversation thread: the most recent *titled* thread, falling
  * back to the most recent thread of any kind. Bringing a session online can
  * seed an empty untitled thread whose `updatedAt` sorts newer than the real
  * conversation, so recency alone is not a reliable signal — titled threads win
@@ -83,18 +84,14 @@ export function conversationThread<T extends { title?: string | null; updatedAt?
   return sorted.find(thread => thread.title?.trim()) ?? sorted[0];
 }
 
-/**
- * Maps each worktree to its conversation thread's title. A factory worktree
- * holds a single conversation, so this is the session's display name; paths
- * with no titled thread yet are omitted (callers fall back to the branch).
- */
+/** Maps each session scope to its conversation thread title. */
 export function useWorkspaceThreadTitles(options: WorkspaceActivityOptions): Record<string, string> {
   const threads = useWorkspaceThreadsQuery(options);
   const titles: Record<string, string> = {};
-  for (const path of options.worktreePaths) {
-    const thread = conversationThread(threads.filter(t => t.tags?.projectPath === path));
+  for (const scope of options.sessionScopes) {
+    const thread = conversationThread(threads.filter(t => threadMatchesScope(t, scope)));
     const title = thread?.title?.trim();
-    if (title) titles[path] = title;
+    if (title) titles[scope] = title;
   }
   return titles;
 }

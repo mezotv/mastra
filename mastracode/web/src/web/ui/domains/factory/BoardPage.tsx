@@ -469,7 +469,7 @@ function Board({ factory }: { factory: GithubFactory }) {
     resourceId: factory.resourceId,
   });
   const openThread = async (session: WorkItemSessionRef) => {
-    await selectWorkspace.mutateAsync(session.projectPath);
+    await selectWorkspace.mutateAsync(session.sessionId);
     navigate(`/threads/${session.threadId}`);
   };
 
@@ -846,7 +846,7 @@ function WorkItemCard({
   // Session refs whose worktree was deleted are stale: their threads went with
   // the worktree, so they don't render links and don't block re-running.
   const liveSessions = Object.fromEntries(
-    Object.entries(item.sessions).filter(([, session]) => liveWorktreePaths.has(session.projectPath)),
+    Object.entries(item.sessions).filter(([, session]) => liveWorktreePaths.has(session.sessionId)),
   );
   // Offer only runs whose session slot hasn't been used yet on this card.
   const runActions = runSpec === null ? [] : runSpec.actions.filter(action => !(action.role in liveSessions));

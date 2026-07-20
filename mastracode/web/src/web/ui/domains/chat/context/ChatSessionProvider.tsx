@@ -1,13 +1,19 @@
 import { Notice } from '@mastra/playground-ui/components/Notice';
+import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { createContext, useContext } from 'react';
 
 import { useApiConfig } from '../../../../../shared/api/config';
-import { useWebAuth } from '../../../../../shared/hooks/useWebAuth';
+import { queryKeys } from '../../../../../shared/api/keys';
 import { SkeletonRows } from '../../../ui';
-import { userSessionResourceId } from '../../auth/services/auth';
 import { useActiveFactoryContext } from '../../workspaces/context/ActiveFactoryProvider';
-import { findUserSessionByThreadId, isGithubFactory } from '../../workspaces/services/factories';
+import { listGithubSessions } from '../../workspaces/services/github';
+import {
+  findGithubSessionByThreadId,
+  findUserSessionByThreadId,
+  isGithubFactory,
+  replaceGithubSessions,
+} from '../../workspaces/services/factories';
 import { deriveProjectPath } from '../../../../../shared/hooks/useWorkspaces';
 import { useAgentControllerThreadMessages } from '../../../../../shared/hooks/useAgentControllerThreadMessages';
 import { AGENT_CONTROLLER_ID } from '../services/constants';
@@ -38,33 +44,54 @@ export function ChatSessionConfigProvider({
   userScoped?: boolean;
 }) {
   const { activeFactory, resourceId, sessionEnabled } = useActiveFactoryContext();
-  const auth = useWebAuth();
   const { baseUrl } = useApiConfig();
-  const projectPath = deriveProjectPath(activeFactory);
-  const userSession = userScoped && threadId ? findUserSessionByThreadId(threadId) : undefined;
+  const cachedSession = userScoped && threadId ? findGithubSessionByThreadId(threadId) : undefined;
+  const legacyWorktreeSession = userScoped && threadId && !cachedSession ? findUserSessionByThreadId(threadId) : undefined;
+  const candidateFactory = cachedSession?.factory ?? legacyWorktreeSession?.factory ?? activeFactory;
+  const candidateGithubProjectId =
+    candidateFactory && isGithubFactory(candidateFactory) ? candidateFactory.binding.githubProjectId : undefined;
+  const sessionsQuery = useQuery({
+    queryKey: [...queryKeys.userSessions(candidateFactory?.id), 'resolve', threadId ?? null] as const,
+    queryFn: async () => {
+      if (!candidateFactory || !candidateGithubProjectId) throw new Error('User session not found');
+      const sessions = await listGithubSessions(baseUrl, candidateGithubProjectId);
+      replaceGithubSessions(candidateFactory, sessions);
+      return sessions.find(session => session.threadId === threadId) ?? null;
+    },
+    enabled: userScoped && Boolean(threadId && !cachedSession && candidateGithubProjectId),
+    retry: false,
+  });
+  const resolvedSession = cachedSession?.session ?? sessionsQuery.data;
+  const personalFactory = cachedSession?.factory ?? (resolvedSession ? candidateFactory : undefined) ?? legacyWorktreeSession?.factory;
+  const personalGithubProjectId =
+    personalFactory && isGithubFactory(personalFactory) ? personalFactory.binding.githubProjectId : undefined;
+  const personalResourceId = resolvedSession?.resourceId ?? personalFactory?.resourceId ?? personalGithubProjectId;
+  const sessionScope = userScoped ? (resolvedSession?.id ?? legacyWorktreeSession?.worktree.worktreePath ?? '') : deriveProjectPath(activeFactory);
   const githubFactory = activeFactory && isGithubFactory(activeFactory) ? activeFactory : undefined;
-  const projectSessionEnabled = sessionEnabled && (!githubFactory || Boolean(projectPath));
-  const value = userScoped
-    ? {
-        resourceId: userSessionResourceId(auth.data),
-        sessionEnabled: !auth.isPending && Boolean(userSession),
-        projectPath: userSession?.worktree.worktreePath,
-        baseUrl,
-        kind: 'user' as const,
-        threadBasePath: '/user/threads' as const,
-      }
-    : {
-        resourceId,
-        sessionEnabled: projectSessionEnabled,
-        projectPath,
-        // Session state consumed server-side: GitHub PR auto-subscription,
-        // the subscribe tools, and agent git-action auditing all gate on
-        // `githubProjectId` being present in session state.
-        projectState: githubFactory ? { githubProjectId: githubFactory.binding.githubProjectId } : undefined,
-        baseUrl,
-        kind: githubFactory ? ('factory' as const) : ('user' as const),
-        threadBasePath: '/threads' as const,
-      };
+  const projectSessionEnabled = userScoped
+    ? Boolean(personalResourceId && sessionScope)
+    : sessionEnabled && (!githubFactory || Boolean(sessionScope));
+  const value = {
+    resourceId: userScoped ? (personalResourceId ?? resourceId) : resourceId,
+    sessionEnabled: projectSessionEnabled,
+    projectPath: sessionScope,
+    projectState: !userScoped && githubFactory ? { githubProjectId: githubFactory.binding.githubProjectId } : undefined,
+    baseUrl,
+    kind: userScoped || !githubFactory ? ('user' as const) : ('factory' as const),
+    threadBasePath: userScoped ? ('/user/threads' as const) : ('/threads' as const),
+  };
+
+  if (userScoped && threadId && !resolvedSession && !legacyWorktreeSession) {
+    return (
+      <ChatSessionContext.Provider value={value}>
+        <ChatMessageFeedback
+          threadId={threadId}
+          isPending={sessionsQuery.isPending}
+          error={sessionsQuery.isPending ? null : sessionsQuery.error ?? new Error('User session not found')}
+        />
+      </ChatSessionContext.Provider>
+    );
+  }
 
   return <ChatSessionContext.Provider value={value}>{children}</ChatSessionContext.Provider>;
 }
@@ -86,7 +113,7 @@ export function ChatSessionBoundary({
   const messagesQuery = useAgentControllerThreadMessages({
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
-    projectPath,
+    sessionScope: projectPath,
     threadId,
     baseUrl,
     enabled: sessionEnabled && Boolean(threadId),

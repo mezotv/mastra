@@ -330,16 +330,14 @@ describe('WorkspacesSection', () => {
     expect(playDoneSound).not.toHaveBeenCalled();
   });
 
-  it('selects a workspace row and persists its worktree path', async () => {
+  it('selects a workspace row and persists its session id', async () => {
     seedActiveFactory(githubProject);
     useAgentControllerHandlers();
     renderSection();
 
     await userEvent.click(await screen.findByRole('button', { name: 'feat-ui' }));
 
-    await waitFor(() =>
-      expect(storedGithubFactory().binding.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-ui'),
-    );
+    await waitFor(() => expect(storedGithubFactory().binding.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-ui'));
     // Let the open-thread flow settle so its requests can't leak into later tests.
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/threads/thread-generic'));
   });
@@ -500,7 +498,7 @@ describe('WorkspacesSection', () => {
         const url = new URL(request.url);
         // The cascade lists threads scoped to the deleted worktree; return one
         // thread on the first scoped call, none afterwards.
-        if (url.searchParams.get('tags') === JSON.stringify({ projectPath: '/sandbox/mastra-worktrees/feat-ui' })) {
+        if (url.searchParams.get('tags') === JSON.stringify({ sessionId: '/sandbox/mastra-worktrees/feat-ui' })) {
           listRequests += 1;
           return HttpResponse.json({
             threads: listRequests === 1 ? [{ id: 'thread-doomed', title: 'Doomed', resourceId: 'resource-gh' }] : [],
@@ -512,13 +510,9 @@ describe('WorkspacesSection', () => {
         deletedThreads.push(String(params.threadId));
         return HttpResponse.json({ ok: true });
       }),
-      http.post(`${ORIGIN}/web/github/repositories/${GITHUB_PROJECT_ID}/worktree/delete`, async ({ request }) => {
-        deletedBranch = ((await request.json()) as { branch: string }).branch;
-        return HttpResponse.json({
-          removed: true,
-          branch: 'feat-ui',
-          worktreePath: '/sandbox/mastra-worktrees/feat-ui',
-        });
+      http.delete(`${ORIGIN}/web/github/projects/${GITHUB_PROJECT_ID}/sessions/:sessionId`, ({ params }) => {
+        deletedBranch = params.sessionId === '/sandbox/mastra-worktrees/feat-ui' ? 'feat-ui' : String(params.sessionId);
+        return HttpResponse.json({ ok: true, sessionId: params.sessionId });
       }),
     );
     renderSection();
@@ -547,13 +541,9 @@ describe('WorkspacesSection', () => {
     useAgentControllerHandlers();
     let deleteCalled = false;
     server.use(
-      http.post(`${ORIGIN}/web/github/repositories/${GITHUB_PROJECT_ID}/worktree/delete`, () => {
+      http.delete(`${ORIGIN}/web/github/projects/${GITHUB_PROJECT_ID}/sessions/:sessionId`, () => {
         deleteCalled = true;
-        return HttpResponse.json({
-          removed: true,
-          branch: 'feat-ui',
-          worktreePath: '/sandbox/mastra-worktrees/feat-ui',
-        });
+        return HttpResponse.json({ ok: true });
       }),
     );
     renderSection();

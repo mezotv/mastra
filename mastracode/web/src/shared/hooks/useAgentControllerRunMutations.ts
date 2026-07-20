@@ -10,7 +10,7 @@ import {
 interface AgentControllerRunMutationArgs {
   agentControllerId: string;
   resourceId: string;
-  projectPath?: string;
+  sessionScope?: string;
   baseUrl?: string;
   enabled?: boolean;
 }
@@ -18,18 +18,18 @@ interface AgentControllerRunMutationArgs {
 function toClientArgs({
   agentControllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   baseUrl,
   enabled,
 }: AgentControllerRunMutationArgs) {
-  return { agentControllerId, resourceId, scope: projectPath, baseUrl, enabled };
+  return { agentControllerId, resourceId, scope: sessionScope, baseUrl, enabled };
 }
 
-function useSessionInvalidation({ agentControllerId, resourceId, projectPath }: AgentControllerRunMutationArgs) {
+function useSessionInvalidation({ agentControllerId, resourceId, sessionScope }: AgentControllerRunMutationArgs) {
   const queryClient = useQueryClient();
   return async () => {
     await queryClient.invalidateQueries({
-      queryKey: queryKeys.agentControllerSession(agentControllerId, resourceId, projectPath),
+      queryKey: queryKeys.agentControllerSession(agentControllerId, resourceId, sessionScope),
       exact: true,
     });
   };

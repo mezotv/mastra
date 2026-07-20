@@ -9,10 +9,10 @@
 export type WorkItemSource = 'github-issue' | 'github-pr' | 'linear-issue' | 'manual';
 
 export interface WorkItemSessionRef {
-  projectPath: string;
+  sessionId: string;
   branch: string;
   threadId: string;
-  /** WorkOS user id whose sandbox the session runs in (stamped server-side). */
+  /** WorkOS user id whose session started this factory run (stamped server-side). */
   startedBy: string;
 }
 
@@ -42,7 +42,7 @@ export interface WorkItem {
 
 /** Session ref as sent by the client — `startedBy` is stamped server-side. */
 export interface WorkItemSessionInput {
-  projectPath: string;
+  sessionId: string;
   branch: string;
   threadId: string;
 }

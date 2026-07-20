@@ -120,19 +120,19 @@ describe('useAgentControllerConnection', () => {
     const projectState = {
       githubProjectId: 'github-project-1',
       sandboxId: 'sandbox-1',
-      sandboxWorkdir: '/sandbox/repo',
+      sandboxWorkdir: 'web-session-1',
     };
     const { result } = renderHookWithProviders(() =>
       useAgentControllerConnection({
         ...hookArgs,
-        projectPath: '/sandbox/repo',
+        sessionScope: 'web-session-1',
         projectState,
         onEvent,
       }),
     );
 
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(receivedState).toEqual({ state: { projectPath: '/sandbox/repo', ...projectState } });
+    expect(receivedState).toEqual({ state: { sessionId: 'web-session-1', ...projectState } });
   });
 
   it('given the event callback changes after connection, then the active stream is not resubscribed', async () => {

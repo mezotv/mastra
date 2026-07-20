@@ -18,14 +18,14 @@ export function useRouteThreadSync() {
   const threadsQuery = useAgentControllerThreads({
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
-    projectPath,
+    sessionScope: projectPath,
     baseUrl,
     enabled: sessionEnabled,
   });
   const switchThreadMutation = useSwitchAgentControllerThreadMutation({
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
-    projectPath,
+    sessionScope: projectPath,
     baseUrl,
     enabled: sessionEnabled,
   });
@@ -34,6 +34,7 @@ export function useRouteThreadSync() {
   const { session } = createAgentControllerClient({
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
+    scope: projectPath,
     baseUrl,
     enabled: sessionEnabled,
   });

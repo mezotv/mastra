@@ -10,7 +10,7 @@ import {
 interface AgentControllerPermissionMutationArgs {
   agentControllerId: string;
   resourceId: string;
-  projectPath?: string;
+  sessionScope?: string;
   baseUrl?: string;
   enabled?: boolean;
 }
@@ -18,7 +18,7 @@ interface AgentControllerPermissionMutationArgs {
 export function useSetPermissionForCategoryMutation({
   agentControllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   baseUrl = '',
   enabled = true,
 }: AgentControllerPermissionMutationArgs) {
@@ -26,7 +26,7 @@ export function useSetPermissionForCategoryMutation({
   const { session } = createAgentControllerClient({
     agentControllerId,
     resourceId,
-    scope: projectPath,
+    scope: sessionScope,
     baseUrl,
     enabled,
   });
@@ -36,7 +36,7 @@ export function useSetPermissionForCategoryMutation({
       requireAgentControllerSession(session).setPermissionForCategory(category, policy),
     onSuccess: () =>
       queryClient.invalidateQueries({
-        queryKey: queryKeys.agentControllerPermissions(agentControllerId, resourceId, projectPath),
+        queryKey: queryKeys.agentControllerPermissions(agentControllerId, resourceId, sessionScope),
       }),
   });
 }

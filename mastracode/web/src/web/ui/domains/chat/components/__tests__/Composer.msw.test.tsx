@@ -366,7 +366,7 @@ describe('Composer', () => {
 
       const composerBox = textbox.closest('[data-slot="composer-box"]');
       if (!composerBox) throw new Error('Expected the textbox to be inside a composer box');
-      expect(getComputedStyle(composerBox).borderColor).toBe('rgb(22, 200, 88)');
+      await waitFor(() => expect(getComputedStyle(composerBox).borderColor).toBe('rgb(22, 200, 88)'));
     });
   });
 

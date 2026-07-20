@@ -300,44 +300,71 @@ async function postRepositoryGitOp<T>(
   return (await res.json()) as T;
 }
 
-export interface WorktreeResult {
-  worktreePath: string;
+export interface GithubSessionResult {
+  id: string;
+  resourceId: string;
+  scope: string;
+  githubProjectId: string;
   branch: string;
   baseBranch: string;
-  resourceId: string;
+  threadId: string | null;
+  sandboxId?: string | null;
+  sandboxWorkdir?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
-/**
- * Create (or reuse) a git worktree + feature branch for a unit of work inside
- * the project's cloud sandbox. `baseBranch` defaults to the project's default
- * branch server-side when omitted.
- */
-export async function createWorktree(
+async function projectJson<T>(baseUrl: string, githubProjectId: string, action: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${baseUrl}/web/github/projects/${encodeURIComponent(githubProjectId)}/${action}`, {
+    credentials: 'include',
+    headers: { Accept: 'application/json', ...(init?.body ? { 'content-type': 'application/json' } : {}) },
+    ...init,
+  });
+  if (!res.ok) {
+    let code = `http_${res.status}`;
+    let message = `Request failed (${res.status})`;
+    try {
+      const body = (await res.json()) as { error?: string; message?: string };
+      if (body.error) code = body.error;
+      if (body.message) message = body.message;
+      else if (body.error) message = body.error;
+    } catch {
+      /* ignore non-JSON */
+    }
+    const err = new Error(message) as GitOpError;
+    err.code = code;
+    err.status = res.status;
+    if (res.status === 401) err.authRequired = true;
+    throw err;
+  }
+  return (await res.json()) as T;
+}
+
+export async function listGithubSessions(baseUrl: string, githubProjectId: string): Promise<GithubSessionResult[]> {
+  const data = await projectJson<{ sessions: GithubSessionResult[] }>(baseUrl, githubProjectId, 'sessions');
+  return data.sessions;
+}
+
+export async function createGithubSession(
   baseUrl: string,
   githubProjectId: string,
   branch: string,
   baseBranch?: string,
-): Promise<WorktreeResult> {
-  return postRepositoryGitOp<WorktreeResult>(baseUrl, githubProjectId, 'worktree', { branch, baseBranch });
+): Promise<GithubSessionResult> {
+  return projectJson<GithubSessionResult>(baseUrl, githubProjectId, 'sessions', {
+    method: 'POST',
+    body: JSON.stringify({ branch, baseBranch }),
+  });
 }
 
-export interface DeleteWorktreeResult {
-  removed: boolean;
-  branch: string;
-  worktreePath: string;
-}
-
-/**
- * Delete a worktree's checkout (and local feature branch) from the project's
- * sandbox and drop its persisted row. Destructive: any uncommitted work in the
- * checkout is discarded, so callers must confirm with the user first.
- */
-export async function deleteWorktree(
+export async function deleteGithubSession(
   baseUrl: string,
   githubProjectId: string,
-  branch: string,
-): Promise<DeleteWorktreeResult> {
-  return postRepositoryGitOp<DeleteWorktreeResult>(baseUrl, githubProjectId, 'worktree/delete', { branch });
+  sessionId: string,
+): Promise<{ deleted: boolean; id: string }> {
+  return projectJson<{ deleted: boolean; id: string }>(baseUrl, githubProjectId, `sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
 }
 
 export interface CommitResult {

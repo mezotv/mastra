@@ -14,7 +14,7 @@ export function useGlobalShortcuts() {
   const abortMutation = useAbortAgentControllerMutation({
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
-    projectPath,
+    sessionScope: projectPath,
     baseUrl,
     enabled: sessionEnabled,
   });

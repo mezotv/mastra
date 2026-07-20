@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import { server } from '../../../../e2e/web-ui/msw-server';
 import { renderHookWithProviders, waitForMutationsIdle, TEST_BASE_URL } from '../../../../e2e/web-ui/render';
-import type { GitOpError, PushResult, WorktreeResult } from '../../../web/ui/domains/workspaces/services/github';
+import type { GitOpError, GithubSessionResult, PushResult } from '../../../web/ui/domains/workspaces/services/github';
 import { useCreateWorktreeMutation, usePushBranchMutation } from '../useGithubGitOps';
 
 const ORIGIN = TEST_BASE_URL;
@@ -19,29 +19,34 @@ const PROJECT = 'ghp_1';
 const PROJECT_URL = `${ORIGIN}/web/github/repositories/${PROJECT}`;
 
 describe('git operation mutation hooks', () => {
-  it('given a branch and base, when creating a worktree, then it posts them and resolves the worktree result', async () => {
-    const worktree: WorktreeResult = {
-      worktreePath: '/workspace/worktrees/feat-x',
+  it('given a branch and base, when creating a session, then it posts them and resolves the session result', async () => {
+    const session: GithubSessionResult = {
+      id: 'session-feat-x',
+      scope: 'session-feat-x',
+      githubProjectId: PROJECT,
       branch: 'feat-x',
       baseBranch: 'main',
-      resourceId: 'resource-feat-x',
+      resourceId: PROJECT,
+      threadId: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
     };
     server.use(
-      http.post(`${PROJECT_URL}/worktree`, async ({ request }) => {
+      http.post(`${PROJECT_URL}/sessions`, async ({ request }) => {
         expect(await request.json()).toEqual({ branch: 'feat-x', baseBranch: 'main' });
-        return HttpResponse.json(worktree);
+        return HttpResponse.json(session);
       }),
     );
 
     const { result, client } = renderHookWithProviders(() => useCreateWorktreeMutation());
 
-    let resolved: WorktreeResult | undefined;
+    let resolved: GithubSessionResult | undefined;
     await act(async () => {
       resolved = await result.current.mutateAsync({ githubProjectId: PROJECT, branch: 'feat-x', baseBranch: 'main' });
     });
     await waitForMutationsIdle(client);
 
-    expect(resolved).toEqual(worktree);
+    expect(resolved).toEqual(session);
   });
 
   it('given a branch, when pushing, then it resolves the pushed branch', async () => {
@@ -66,7 +71,7 @@ describe('git operation mutation hooks', () => {
 
   it('given the server rejects with a 400 error body, when the mutation fails, then the error carries the code and status', async () => {
     server.use(
-      http.post(`${PROJECT_URL}/worktree`, () =>
+      http.post(`${PROJECT_URL}/sessions`, () =>
         HttpResponse.json({ error: 'invalid_branch', message: 'Invalid branch' }, { status: 400 }),
       ),
     );

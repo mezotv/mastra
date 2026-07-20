@@ -14,7 +14,7 @@
  * remains the SDK/TUI session tag for the execution workspace path.
  */
 
-import type { MaterializeResult } from './github';
+import type { GithubSessionResult, MaterializeResult } from './github';
 
 const STORAGE_KEY = 'mastracode-factories';
 const ACTIVE_KEY = 'mastracode-active-factory';
@@ -370,6 +370,58 @@ export function findUserSessionByThreadId(threadId: string): { factory: Factory;
   for (const factory of loadFactories()) {
     const worktree = userSessionWorktrees(factory).find(item => item.threadId === threadId);
     if (worktree) return { factory, worktree };
+  }
+  return undefined;
+}
+
+export function sessionResultToWorktree(session: GithubSessionResult): Worktree {
+  return {
+    branch: session.branch,
+    worktreePath: session.id,
+    baseBranch: session.baseBranch,
+    threadId: session.threadId ?? undefined,
+  };
+}
+
+export function replaceGithubSessions(factory: Factory, sessions: GithubSessionResult[]): Factory {
+  if (!isGithubFactory(factory)) return factory;
+  const sessionIds = new Set(sessions.map(session => session.id));
+  const nonSessionWorktrees = allFactoryWorktrees(factory).filter(worktree => !sessionIds.has(worktree.worktreePath));
+  const updated: GithubFactory = {
+    ...factory,
+    resourceId: sessions[0]?.resourceId ?? factory.resourceId,
+    binding: {
+      ...factory.binding,
+      worktrees: [...nonSessionWorktrees, ...sessions.map(sessionResultToWorktree)],
+    },
+  };
+  updateFactory(updated);
+  return updated;
+}
+
+export function findGithubSessionByThreadId(
+  threadId: string,
+): { factory: GithubFactory; session: GithubSessionResult } | undefined {
+  for (const factory of loadFactories()) {
+    if (!isGithubFactory(factory)) continue;
+    const worktree = allFactoryWorktrees(factory).find(item => item.threadId === threadId);
+    if (!worktree) continue;
+    return {
+      factory,
+      session: {
+        id: worktree.worktreePath,
+        resourceId: factory.resourceId ?? factory.binding.githubProjectId,
+        scope: worktree.worktreePath,
+        githubProjectId: factory.binding.githubProjectId,
+        branch: worktree.branch,
+        baseBranch: worktree.baseBranch,
+        threadId: worktree.threadId ?? null,
+        sandboxId: factory.binding.sandboxId ?? null,
+        sandboxWorkdir: factory.binding.sandboxWorkdir ?? null,
+        createdAt: new Date(factory.createdAt).toISOString(),
+        updatedAt: new Date(factory.createdAt).toISOString(),
+      },
+    };
   }
   return undefined;
 }

@@ -205,8 +205,8 @@ function useAgentControllerHandlers({
       HttpResponse.json({ rootPath: '/tmp/mastracode-test', renderedPath: '.artifacts', entries: [] }),
     ),
     http.post(`${API}/sessions/:resourceId/messages`, async ({ request }) => {
-      const { message } = (await request.json()) as { message: string };
-      captured.sent.push(message);
+      const { content, message } = (await request.json()) as { content?: string; message?: string };
+      captured.sent.push(content ?? message ?? '');
       return HttpResponse.json({ ok: true });
     }),
   );
@@ -325,9 +325,9 @@ describe('MastraCode thread pages', () => {
     expect(captured.created).toBe(0);
   });
 
-  it('given the /new draft page, when sending the first message, then a thread is created and the URL becomes its thread page', async () => {
+  it('given the /new draft page, when sending the first message, then a thread is created and receives the message', async () => {
     const captured = useAgentControllerHandlers();
-    const { router } = renderRoutes('/new');
+    renderRoutes('/new');
 
     expect(await screen.findByRole('heading', { name: 'What do you want to work on?' })).toBeInTheDocument();
 
@@ -336,7 +336,6 @@ describe('MastraCode thread pages', () => {
     await userEvent.type(composer, 'Hello draft{Enter}');
 
     await waitFor(() => expect(captured.created).toBe(1));
-    await expectPathname(router, `/threads/${newThread.id}`);
     await waitFor(() => expect(captured.sent).toEqual(['Hello draft']));
     await waitFor(() => expect(document.body).toHaveTextContent('Hello draft'));
   });

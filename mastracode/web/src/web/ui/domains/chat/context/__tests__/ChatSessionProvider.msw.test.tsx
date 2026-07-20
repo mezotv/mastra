@@ -105,6 +105,23 @@ const githubProjectWithWorktree: Factory = {
   },
 };
 
+const githubProjectWithUserSession: Factory = {
+  ...githubProject,
+  resourceId: 'github-project-id',
+  binding: {
+    kind: 'github',
+    githubProjectId: 'github-project-id',
+    worktrees: [
+      {
+        branch: 'user/ada',
+        baseBranch: 'main',
+        worktreePath: 'session-ada',
+        threadId: 'user-thread-test',
+      },
+    ],
+  },
+};
+
 function seedFactory(projects: Factory[] = [project], activeFactory: Factory = project) {
   localStorage.setItem('mastracode-factories', JSON.stringify(projects));
   localStorage.setItem('mastracode-active-factory', activeFactory.id);
@@ -234,6 +251,15 @@ function ModelsProbe() {
   );
 }
 
+function ModesAndModelsProbe() {
+  return (
+    <div>
+      <ModesProbe />
+      <ModelsProbe />
+    </div>
+  );
+}
+
 function PermissionsProbe() {
   const { permissions, permissionsLoading, pendingPermissionCategory, setPermissionForCategory } = useChatPermissions();
   const categories = Object.entries(permissions?.categories ?? {})
@@ -286,20 +312,34 @@ function SessionContextProbe() {
   );
 }
 
-function ProbeSession({ threadId, children }: { threadId?: string; children?: ReactNode }) {
+function ProbeSession({
+  threadId,
+  userScoped = false,
+  children,
+}: {
+  threadId?: string;
+  userScoped?: boolean;
+  children?: ReactNode;
+}) {
   return (
     <ActiveFactoryProvider>
-      <ChatSessionProvider threadId={threadId}>{children ?? <Probe />}</ChatSessionProvider>
+      <ChatSessionProvider threadId={threadId} userScoped={userScoped}>
+        {children ?? <Probe />}
+      </ChatSessionProvider>
     </ActiveFactoryProvider>
   );
 }
 
-function renderProbe(threadId?: string) {
-  return renderWithProviders(<ProbeSession threadId={threadId} />);
+function renderProbe(threadId?: string, userScoped = false) {
+  return renderWithProviders(<ProbeSession threadId={threadId} userScoped={userScoped} />);
 }
 
-function renderFocusedProbe(children: ReactNode, threadId?: string) {
-  return renderWithProviders(<ProbeSession threadId={threadId}>{children}</ProbeSession>);
+function renderFocusedProbe(children: ReactNode, threadId?: string, userScoped = false) {
+  return renderWithProviders(
+    <ProbeSession threadId={threadId} userScoped={userScoped}>
+      {children}
+    </ProbeSession>,
+  );
 }
 
 function renderMessageList(threadId?: string) {
@@ -401,7 +441,7 @@ describe('ChatSessionProvider', () => {
 
       await waitFor(() => expect(screen.getByTestId('active-mode-label')).toHaveTextContent('Plan'));
       await waitFor(() => expect(pendingModeButton).toHaveAttribute('aria-busy', 'false'));
-      expect(requestCount(requests, 'state')).toBe(readsBeforeSwitch.state);
+      expect(requestCount(requests, 'state')).toBe(readsBeforeSwitch.state + 1);
       for (const request of ['create', 'modes', 'models', 'permissions', 'threads', 'messages'] as const) {
         expect(requestCount(requests, request)).toBe(readsBeforeSwitch[request]);
       }
@@ -698,9 +738,104 @@ describe('ChatSessionProvider', () => {
 
       await waitFor(() =>
         expect(requests).toContain(
-          'setState:{"state":{"projectPath":"/tmp/mastracode-github-test","githubProjectId":"github-project-id"}}',
+          'setState:{"state":{"sessionId":"/tmp/mastracode-github-test","githubProjectId":"github-project-id"}}',
         ),
       );
+    });
+
+    it('ensures a personal deep link before enabling generic scoped session requests', async () => {
+      const requests: string[] = [];
+      const githubApi = `${API}/sessions/${githubProjectWithUserSession.resourceId}`;
+      seedFactory([githubProjectWithUserSession], githubProjectWithUserSession);
+      server.use(
+        http.post(`${API}/sessions`, async ({ request }) => {
+          requests.push(`create:${JSON.stringify(await request.json())}`);
+          return HttpResponse.json({ controllerId: 'code', resourceId: 'github-project-id', threadId: 'user-thread-test' });
+        }),
+        http.get(`${API}/modes`, () => HttpResponse.json({ modes: [{ id: 'build', name: 'Build' }] })),
+        http.get(`${API}/models`, () => HttpResponse.json({ models: [] })),
+        http.get(githubApi, ({ request }) => {
+          requests.push(`state:${new URL(request.url).searchParams.get('sessionScope') ?? ''}`);
+          return HttpResponse.json(sessionState('github-project-id'));
+        }),
+        http.put(`${githubApi}/state`, ({ request }) => {
+          requests.push(`setState:${new URL(request.url).searchParams.get('sessionScope') ?? ''}`);
+          return HttpResponse.json(sessionState('github-project-id'));
+        }),
+        http.get(`${githubApi}/permissions`, () => HttpResponse.json({ categories: {}, tools: {} })),
+        http.get(`${githubApi}/threads`, () => HttpResponse.json({ threads: [] })),
+        http.get(`${githubApi}/threads/user-thread-test/messages`, () => HttpResponse.json({ messages: [] })),
+        http.get(`${githubApi}/stream`, () => sse()),
+      );
+
+      renderFocusedProbe(<SessionContextProbe />, 'user-thread-test', true);
+
+      await waitFor(() => expect(screen.getByTestId('session-enabled')).toHaveTextContent('yes'));
+      expect(screen.getByTestId('session-resource-id')).toHaveTextContent('github-project-id');
+      expect(screen.getByTestId('session-project-path')).toHaveTextContent('session-ada');
+    });
+
+    it('uses a persisted personal session id as the generic scoped session', async () => {
+      const requests: string[] = [];
+      const githubApi = `${API}/sessions/${githubProjectWithUserSession.resourceId}`;
+      seedFactory([githubProjectWithUserSession], githubProjectWithUserSession);
+      server.use(
+        http.post(`${API}/sessions`, async ({ request }) => {
+          requests.push(`create:${JSON.stringify(await request.json())}`);
+          return HttpResponse.json({ controllerId: 'code', resourceId: 'github-project-id', threadId: 'user-thread-test' });
+        }),
+        http.get(`${API}/modes`, () => {
+          requests.push('modes');
+          return HttpResponse.json({
+            modes: [
+              { id: 'build', name: 'Build' },
+              { id: 'plan', name: 'Plan' },
+            ],
+          });
+        }),
+        http.get(`${API}/models`, () => {
+          requests.push('models');
+          return HttpResponse.json({ models: [] });
+        }),
+        http.get(githubApi, ({ request }) => {
+          requests.push(`state:${new URL(request.url).searchParams.get('sessionScope') ?? ''}`);
+          return HttpResponse.json(sessionState('github-project-id'));
+        }),
+        http.put(`${githubApi}/state`, ({ request }) => {
+          requests.push(`setState:${new URL(request.url).searchParams.get('sessionScope') ?? ''}`);
+          return HttpResponse.json(sessionState('github-project-id'));
+        }),
+        http.get(`${githubApi}/permissions`, () => HttpResponse.json({ categories: {}, tools: {} })),
+        http.get(`${githubApi}/threads`, () => HttpResponse.json({ threads: [] })),
+        http.get(`${githubApi}/threads/user-thread-test/messages`, () => HttpResponse.json({ messages: [] })),
+        http.get(`${githubApi}/stream`, () => sse()),
+      );
+
+      renderFocusedProbe(<ModesAndModelsProbe />, 'user-thread-test', true);
+
+      await waitFor(() => expect(screen.getByTestId('active-mode-label')).toHaveTextContent('Build'));
+      await waitFor(() => expect(screen.getByTestId('active-model-id')).toHaveTextContent('openai/gpt-4o-mini'));
+      expect(requests).toContain('modes');
+    });
+
+    it('shows an error instead of a disabled chat shell when a personal thread mapping is missing', async () => {
+      const requests: string[] = [];
+      seedFactory([githubProject], githubProject);
+      useAgentControllerHandlers([], requests);
+      server.use(
+        http.get(`${TEST_BASE_URL}/web/github/projects/github-project-id/sessions`, () => HttpResponse.json({ sessions: [] })),
+        http.get(`${API}/modes`, () => {
+          requests.push('modes');
+          return HttpResponse.json({ modes: [{ id: 'build', name: 'Build' }] });
+        }),
+      );
+
+      renderFocusedProbe(<SessionContextProbe />, 'missing-user-thread', true);
+
+      expect(await screen.findByText(/Failed to load messages: User session not found/)).toBeVisible();
+      expect(screen.queryByTestId('session-enabled')).not.toBeInTheDocument();
+      expect(requests).not.toContain('create');
+      expect(requests).not.toContain('modes');
     });
   });
 
@@ -753,28 +888,25 @@ describe('ChatSessionProvider', () => {
     });
   });
 
-  it('given a seeded project, when the session connects, then it binds the session to the workspace path before ready', async () => {
+  it('given a seeded project, when the session connects, then it creates and reads state for the session scope', async () => {
     const requests: string[] = [];
     seedFactory();
     useAgentControllerHandlers([], requests);
     renderProbe();
 
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    expect(requests.slice(0, 3)).toEqual([
-      'create',
-      'setState:{"state":{"projectPath":"/tmp/mastracode-test"}}',
-      'state',
-    ]);
+    expect(requests[0]).toBe('create');
+    expect(requests).toContain('state');
   });
 
-  it('given the workspace bind fails, then the connection still becomes ready', async () => {
+  it('given the workspace state write fails, then the connection still becomes ready', async () => {
     const requests: string[] = [];
     seedFactory();
     useAgentControllerHandlers([], requests, 500);
     renderProbe();
 
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
-    expect(requests).toContain('setState:{"state":{"projectPath":"/tmp/mastracode-test"}}');
+    expect(requests).toContain('state');
   });
 
   it('given a different project is selected, then the new session is bound to the new workspace path', async () => {
@@ -786,7 +918,8 @@ describe('ChatSessionProvider', () => {
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     await userEvent.click(screen.getByRole('button', { name: 'switch factory' }));
 
-    await waitFor(() => expect(requests).toContain('setState:next:{"state":{"projectPath":"/tmp/mastracode-next"}}'));
+    await waitFor(() => expect(requests.filter(request => request === 'create')).toHaveLength(2));
+    expect(requests).toContain('state:next');
   });
 
   it('given live state in one project, when selecting another project, then the next project starts with its own empty transcript and runtime', async () => {

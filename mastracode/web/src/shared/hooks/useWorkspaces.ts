@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useApiConfig } from '../api/config';
 import { queryKeys } from '../api/keys';
 import { useToast } from '../../web/ui/ui/toast';
-import { createWorktree, deleteWorktree } from '../../web/ui/domains/workspaces/services/github';
+import { createGithubSession, deleteGithubSession } from '../../web/ui/domains/workspaces/services/github';
 import type { Factory, Worktree } from '../../web/ui/domains/workspaces/services/factories';
 import {
   boardSessionWorktrees,
@@ -107,11 +107,12 @@ export function useCreateWorkspaceMutation(factory: Factory | null | undefined, 
     mutationFn: async (branch: string) => {
       const trimmedBranch = branch.trim();
       if (!factory || !isGithubFactory(factory)) throw new Error('No GitHub factory selected');
-      const result = await createWorktree(baseUrl, factory.binding.githubProjectId, trimmedBranch);
+      const result = await createGithubSession(baseUrl, factory.binding.githubProjectId, trimmedBranch);
       const worktree: Worktree = {
         branch: result.branch,
-        worktreePath: result.worktreePath,
+        worktreePath: result.id,
         baseBranch: result.baseBranch,
+        threadId: result.threadId ?? undefined,
       };
       return selectWorktree(upsertWorktree(latestFactory(factory), worktree), worktree.worktreePath);
     },
@@ -140,7 +141,7 @@ export function useDeleteWorkspaceMutation(
   return useMutation({
     mutationFn: async (worktree: Worktree) => {
       if (!factory || !isGithubFactory(factory)) throw new Error('No GitHub factory selected');
-      await deleteWorktree(baseUrl, factory.binding.githubProjectId, worktree.branch);
+      await deleteGithubSession(baseUrl, factory.binding.githubProjectId, worktree.worktreePath);
 
       // Cascade: delete the threads scoped to this worktree. Re-list between
       // rounds since the page size caps each fetch; bail after a sane number
@@ -149,7 +150,7 @@ export function useDeleteWorkspaceMutation(
         for (let round = 0; round < 20; round++) {
           const threads = await threadSession.listThreads({
             limit: 50,
-            tags: { projectPath: worktree.worktreePath },
+            tags: { sessionId: worktree.worktreePath },
           });
           if (threads.length === 0) break;
           for (const thread of threads) await threadSession.deleteThread(thread.id);

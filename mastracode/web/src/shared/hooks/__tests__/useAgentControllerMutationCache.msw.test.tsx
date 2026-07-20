@@ -14,12 +14,12 @@ import { useAgentControllerThreads } from '../useAgentControllerThreads';
 
 const controllerId = 'code';
 const resourceId = 'resource-test';
-const projectPath = '/sandbox/mastra';
+const sessionScope = 'web-session-1';
 const sessionUrl = `${TEST_BASE_URL}/api/agent-controller/${controllerId}/sessions/${resourceId}`;
 const hookArgs = {
   agentControllerId: controllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   baseUrl: TEST_BASE_URL,
   enabled: true,
 };
@@ -158,7 +158,7 @@ describe('agent-controller mutation hooks cache behavior', () => {
     }));
 
     await waitFor(() => expect(result.current.settingsQuery.data).toEqual(settings));
-    await act(async () => result.current.setState.mutateAsync({ projectPath: '/sandbox/next' }));
+    await act(async () => result.current.setState.mutateAsync({ sessionScope: 'web-session-2' }));
     await waitForMutationsIdle(client);
 
     expect(onReadState).toHaveBeenCalledTimes(1);

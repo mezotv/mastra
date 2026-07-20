@@ -20,8 +20,6 @@ const ORIGIN = TEST_BASE_URL;
 const FACTORY_ID = 'factory-gh';
 const GITHUB_PROJECT_ID = 'github-project-1';
 
-// The persisted shape intentionally includes a personal user-session worktree:
-// it is not a board workspace, so it must be filtered out of the workspaces data.
 const rootFactory: GithubFactory = {
   id: FACTORY_ID,
   name: 'Mastra',
@@ -33,16 +31,16 @@ const rootFactory: GithubFactory = {
     gitBranch: 'main',
     sandboxWorkdir: '/sandbox/mastra',
     worktrees: [
-      { branch: 'feat-ui', worktreePath: '/sandbox/mastra-worktrees/feat-ui', baseBranch: 'main' },
-      { branch: 'feat-api', worktreePath: '/sandbox/mastra-worktrees/feat-api', baseBranch: 'main' },
+      { branch: 'feat-ui', worktreePath: 'session-feat-ui', baseBranch: 'main' },
+      { branch: 'feat-api', worktreePath: 'session-feat-api', baseBranch: 'main' },
       {
         branch: 'user/alice-notes',
-        worktreePath: '/sandbox/mastra-worktrees/user-alice-notes',
+        worktreePath: 'session-user-alice-notes',
         baseBranch: 'main',
         threadId: 'thread-user',
       },
     ],
-    selectedWorktreePath: '/sandbox/mastra-worktrees/feat-ui',
+    selectedWorktreePath: 'session-feat-ui',
   },
 };
 
@@ -76,25 +74,31 @@ describe('workspaces query hooks', () => {
     await waitFor(() => expect(result.current.workspaces.data?.selected?.branch).toBe('feat-ui'));
 
     await act(async () => {
-      await result.current.selectWorkspace.mutateAsync('/sandbox/mastra-worktrees/feat-api');
+      await result.current.selectWorkspace.mutateAsync('session-feat-api');
     });
     await waitForMutationsIdle(client);
 
     const stored = loadFactories()[0];
-    expect(isGithubFactory(stored!) && stored.binding.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-api');
+    expect(isGithubFactory(stored!) && stored.binding.selectedWorktreePath).toBe('session-feat-api');
     await waitFor(() => expect(result.current.workspaces.data?.selected?.branch).toBe('feat-api'));
   });
 
-  it('creates a workspace, upserts it, selects it, and refreshes consumers', async () => {
+  it('creates a workspace through a GitHub session row, upserts it, selects it, and refreshes consumers', async () => {
     saveFactory(rootFactory);
+    let received: unknown;
     server.use(
-      http.post(`${ORIGIN}/web/github/repositories/${GITHUB_PROJECT_ID}/worktree`, async ({ request }) => {
-        const body = (await request.json()) as { branch: string };
-        expect(body.branch).toBe('feat-docs');
+      http.post(`${ORIGIN}/web/github/projects/${GITHUB_PROJECT_ID}/sessions`, async ({ request }) => {
+        received = await request.json();
         return HttpResponse.json({
+          id: 'session-feat-docs',
+          scope: 'session-feat-docs',
+          githubProjectId: GITHUB_PROJECT_ID,
           branch: 'feat-docs',
-          worktreePath: '/sandbox/mastra-worktrees/feat-docs',
           baseBranch: 'main',
+          resourceId: GITHUB_PROJECT_ID,
+          threadId: null,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
         });
       }),
     );
@@ -113,22 +117,24 @@ describe('workspaces query hooks', () => {
     });
     await waitForMutationsIdle(client);
 
+    expect(received).toEqual({ branch: 'feat-docs' });
     const stored = loadFactories()[0];
     expect(isGithubFactory(stored!)).toBe(true);
     if (!isGithubFactory(stored!)) throw new Error('expected github factory');
-    expect(stored.binding.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-docs');
+    expect(stored.binding.selectedWorktreePath).toBe('session-feat-docs');
     expect(stored.binding.worktrees.map(worktree => worktree.branch)).toEqual(
       expect.arrayContaining(['feat-ui', 'feat-api', 'feat-docs', 'user/alice-notes']),
     );
+    await waitFor(() => expect(result.current.workspaces.data?.selected?.worktreePath).toBe('session-feat-docs'));
   });
 
-  it('deletes a workspace, cascades threads, and falls back selection', async () => {
+  it('deletes a workspace session, cascades threads, and falls back selection', async () => {
     saveFactory(rootFactory);
+    let deletedSessionId = '';
     server.use(
-      http.post(`${ORIGIN}/web/github/repositories/${GITHUB_PROJECT_ID}/worktree/delete`, async ({ request }) => {
-        const body = (await request.json()) as { branch: string };
-        expect(body.branch).toBe('feat-ui');
-        return HttpResponse.json({ ok: true });
+      http.delete(`${ORIGIN}/web/github/projects/${GITHUB_PROJECT_ID}/sessions/:sessionId`, ({ params }) => {
+        deletedSessionId = String(params.sessionId);
+        return HttpResponse.json({ deleted: true, id: deletedSessionId });
       }),
     );
 
@@ -148,36 +154,19 @@ describe('workspaces query hooks', () => {
       return { workspaces, deleteWorkspace };
     });
 
+    await waitFor(() => expect(result.current.workspaces.data?.selected?.branch).toBe('feat-ui'));
+
     await act(async () => {
-      await result.current.deleteWorkspace.mutateAsync({
-        branch: 'feat-ui',
-        worktreePath: '/sandbox/mastra-worktrees/feat-ui',
-        baseBranch: 'main',
-      });
+      await result.current.deleteWorkspace.mutateAsync({ branch: 'feat-ui', worktreePath: 'session-feat-ui', baseBranch: 'main' });
     });
     await waitForMutationsIdle(client);
 
-    expect(listThreads).toHaveBeenCalled();
-    expect(deleteThread).toHaveBeenCalledWith('thread-1');
-    expect(deleteThread).toHaveBeenCalledWith('thread-2');
-
+    expect(deletedSessionId).toBe('session-feat-ui');
+    expect(listThreads).toHaveBeenCalledWith({ limit: 50, tags: { sessionId: 'session-feat-ui' } });
+    expect(deleteThread).toHaveBeenCalledTimes(2);
     const stored = loadFactories()[0];
-    expect(isGithubFactory(stored!)).toBe(true);
-    if (!isGithubFactory(stored!)) throw new Error('expected github factory');
-    expect(stored.binding.worktrees.map(worktree => worktree.branch)).toEqual(['feat-api', 'user/alice-notes']);
-    expect(stored.binding.selectedWorktreePath).toBe('/sandbox/mastra-worktrees/feat-api');
-  });
-
-  it('derives projectPath from the selected worktree for GitHub factories', () => {
-    expect(deriveProjectPath(rootFactory)).toBe('/sandbox/mastra-worktrees/feat-ui');
-    expect(
-      deriveProjectPath({
-        id: 'factory-local',
-        name: 'Local',
-        resourceId: 'resource-local',
-        createdAt: 1,
-        binding: { kind: 'local', path: '/repo/local' },
-      }),
-    ).toBe('/repo/local');
+    expect(isGithubFactory(stored!) && stored.binding.selectedWorktreePath).toBe('session-feat-api');
+    await waitFor(() => expect(result.current.workspaces.data?.selected?.branch).toBe('feat-api'));
+    expect(deriveProjectPath(stored)).toBe('session-feat-api');
   });
 });

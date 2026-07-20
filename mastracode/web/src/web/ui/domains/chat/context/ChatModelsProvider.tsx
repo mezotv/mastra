@@ -17,7 +17,7 @@ export function ChatModelsProvider({ children }: ChatModelsProviderProps) {
   const switchModelMutation = useSwitchAgentControllerModelMutation({
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
-    projectPath,
+    sessionScope: projectPath,
     baseUrl,
     enabled: sessionEnabled,
   });

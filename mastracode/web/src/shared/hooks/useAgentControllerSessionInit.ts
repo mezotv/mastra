@@ -9,7 +9,7 @@ import {
 interface UseAgentControllerSessionInitArgs {
   agentControllerId: string;
   resourceId: string;
-  projectPath?: string;
+  sessionScope?: string;
   projectState?: Record<string, unknown>;
   baseUrl?: string;
   enabled?: boolean;
@@ -18,7 +18,7 @@ interface UseAgentControllerSessionInitArgs {
 export function useAgentControllerSessionInit({
   agentControllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   projectState,
   baseUrl = '',
   enabled = true,
@@ -26,23 +26,23 @@ export function useAgentControllerSessionInit({
   const { session } = createAgentControllerClient({
     agentControllerId,
     resourceId,
-    scope: projectPath,
+    scope: sessionScope,
     baseUrl,
     enabled,
   });
 
   return useQuery({
     queryKey: [
-      ...queryKeys.agentControllerConnection(agentControllerId, resourceId, projectPath),
+      ...queryKeys.agentControllerConnection(agentControllerId, resourceId, sessionScope),
       'init',
       projectState,
     ],
     queryFn: async () => {
       const activeSession = requireAgentControllerSession(session);
-      const created = await activeSession.create({ tags: projectPath ? { projectPath } : undefined });
-      if (projectPath) {
+      const created = await activeSession.create({ tags: sessionScope ? { sessionId: sessionScope } : undefined });
+      if (sessionScope) {
         try {
-          await activeSession.setState({ projectPath, ...projectState });
+          await activeSession.setState({ sessionId: sessionScope, ...projectState });
         } catch {
           // Continue connecting; session.state() remains the source of truth.
         }

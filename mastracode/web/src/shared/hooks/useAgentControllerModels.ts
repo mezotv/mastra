@@ -6,7 +6,7 @@ import { createAgentControllerClient } from '../../web/ui/domains/chat/services/
 interface UseAgentControllerModelsArgs {
   agentControllerId: string;
   resourceId: string;
-  projectPath?: string;
+  sessionScope?: string;
   baseUrl?: string;
   enabled?: boolean;
 }
@@ -14,14 +14,14 @@ interface UseAgentControllerModelsArgs {
 export function useAgentControllerModels({
   agentControllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   baseUrl = '',
   enabled = true,
 }: UseAgentControllerModelsArgs) {
   const { controller } = createAgentControllerClient({
     agentControllerId,
     resourceId,
-    scope: projectPath,
+    scope: sessionScope,
     baseUrl,
     enabled,
   });

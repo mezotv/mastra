@@ -77,6 +77,18 @@ const githubProject: Factory = {
   },
 };
 
+const githubProjectWithUserSession: Factory = {
+  ...githubProject,
+  resourceId: 'gh-project-1',
+  binding: {
+    ...githubProject.binding,
+    worktrees: [
+      ...githubProject.binding.worktrees,
+      { branch: 'user/ada', worktreePath: 'session-ada', baseBranch: 'main', threadId: 'user-thread-1' },
+    ],
+  },
+};
+
 const threadOne: AgentControllerThreadInfo = {
   id: 'thread-one',
   title: 'First thread',
@@ -159,9 +171,16 @@ function useAgentControllerHandlers(): CapturedRequests {
   };
 
   server.use(
-    http.post(`${API}/sessions`, () =>
-      HttpResponse.json({ controllerId: 'code', resourceId: RESOURCE_ID, threadId: threadOne.id }),
-    ),
+    http.get(`${TEST_BASE_URL}/web/github/projects/gh-project-1/sessions`, () => HttpResponse.json({ sessions: [] })),
+    http.post(`${API}/sessions`, async ({ request }) => {
+      const body = (await request.json()) as { resourceId?: string };
+      const resourceId = body.resourceId ?? RESOURCE_ID;
+      return HttpResponse.json({
+        controllerId: 'code',
+        resourceId,
+        threadId: resourceId === 'gh-project-1' ? 'user-thread-created' : threadOne.id,
+      });
+    }),
     http.get(`${API}/modes`, () => HttpResponse.json({ modes: [{ id: 'build', label: 'Build' }] })),
     http.get(`${API}/models`, () => HttpResponse.json({ models: [] })),
     http.get(SESSION, () => HttpResponse.json(sessionState())),
@@ -353,6 +372,91 @@ describe('Sidebar', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Sessions' }));
       await screen.findByRole('button', { name: 'feat-ui' });
       expect(screen.queryByText('First thread')).not.toBeInTheDocument();
+    });
+
+    it('lists personal sessions before polling activity through the project resource and session scope', async () => {
+      const requests: string[] = [];
+      seedFactory(githubProjectWithUserSession);
+      useAuthHandler();
+      useGithubStatusHandler();
+      server.use(
+        http.get(`${TEST_BASE_URL}/web/github/projects/gh-project-1/sessions`, () =>
+          HttpResponse.json({
+            sessions: [
+              {
+                id: 'session-ada',
+                scope: 'session-ada',
+                githubProjectId: 'gh-project-1',
+                resourceId: 'gh-project-1',
+                branch: 'user/ada',
+                baseBranch: 'main',
+                threadId: 'user-thread-1',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          }),
+        ),
+        http.post(`${API}/sessions`, () =>
+          HttpResponse.json({ controllerId: 'code', resourceId: 'gh-project-1', threadId: 'user-thread-created' }),
+        ),
+        http.get(`${API}/modes`, () => HttpResponse.json({ modes: [{ id: 'build', label: 'Build' }] })),
+        http.get(`${API}/models`, () => HttpResponse.json({ models: [] })),
+        http.get(`${API}/sessions/gh-project-1`, () => HttpResponse.json({ ...sessionState(), resourceId: 'gh-project-1' })),
+        http.put(`${API}/sessions/gh-project-1/state`, () => HttpResponse.json({ ...sessionState(), resourceId: 'gh-project-1' })),
+        http.get(`${API}/sessions/gh-project-1/permissions`, () => HttpResponse.json({ categories: {}, tools: {} })),
+        http.get(`${API}/sessions/gh-project-1/stream`, () => sse()),
+        http.get(`${API}/sessions/gh-project-1/threads`, ({ request }) => {
+          requests.push(`threads:${new URL(request.url).searchParams.get('sessionScope') ?? ''}`);
+          return HttpResponse.json({ threads: [] });
+        }),
+      );
+      renderSidebar();
+
+      expect(await screen.findByRole('button', { name: 'ada' })).toBeInTheDocument();
+    });
+
+    it('creates one personal session when Enter submits the create form', async () => {
+      const sessionRequests: unknown[] = [];
+      seedFactory(githubProject);
+      useAuthHandler();
+      useGithubStatusHandler();
+      useAgentControllerHandlers();
+      server.use(
+        http.post(`${TEST_BASE_URL}/web/github/projects/gh-project-1/sessions`, async ({ request }) => {
+          sessionRequests.push(await request.json());
+          return HttpResponse.json(
+            {
+              id: 'session-ada-case',
+              scope: 'session-ada-case',
+              githubProjectId: 'gh-project-1',
+              resourceId: 'gh-project-1',
+              branch: 'user/ada-case',
+              baseBranch: 'main',
+              threadId: null,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+            { status: 201 },
+          );
+        }),
+        http.post(`${API}/sessions/gh-project-1/threads`, () =>
+          HttpResponse.json({
+            id: 'user-thread-created',
+            title: 'New thread',
+            resourceId: 'gh-project-1',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          }),
+        ),
+      );
+      renderSidebar();
+
+      await userEvent.click(await screen.findByRole('button', { name: 'Create session' }));
+      await userEvent.type(screen.getByPlaceholderText('session-name'), 'Ada Case{Enter}');
+
+      await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/user/threads/user-thread-created'));
+      expect(sessionRequests).toEqual([{ branch: 'user/ada-case' }]);
     });
   });
 

@@ -34,7 +34,7 @@ export function useRunPaletteCommand(setComposerCommandName: Dispatch<SetStateAc
   const hookArgs = {
     agentControllerId: AGENT_CONTROLLER_ID,
     resourceId,
-    projectPath,
+    sessionScope: projectPath,
     baseUrl,
     enabled: sessionEnabled,
   };

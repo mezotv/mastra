@@ -54,13 +54,13 @@ describe('agent-controller read hooks', () => {
     );
 
     const { result } = renderHookWithProviders(() =>
-      useAgentControllerThreads({ ...hookArgs, projectPath: '/sandbox/mastra' }),
+      useAgentControllerThreads({ ...hookArgs, sessionScope: 'web-session-1' }),
     );
 
     await waitFor(() => expect(result.current.data?.[0]?.id).toBe('thread-one'));
     expect(onReadThreads).toHaveBeenCalledWith({
       limit: String(AGENT_CONTROLLER_THREAD_PAGE_SIZE),
-      tags: JSON.stringify({ projectPath: '/sandbox/mastra' }),
+      tags: JSON.stringify({ sessionId: 'web-session-1' }),
     });
   });
 

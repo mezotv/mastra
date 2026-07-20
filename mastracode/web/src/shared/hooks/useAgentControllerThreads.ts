@@ -8,7 +8,7 @@ export const AGENT_CONTROLLER_THREAD_PAGE_SIZE = 20;
 interface UseAgentControllerThreadsArgs {
   agentControllerId: string;
   resourceId: string;
-  projectPath?: string;
+  sessionScope?: string;
   baseUrl?: string;
   enabled?: boolean;
 }
@@ -16,24 +16,24 @@ interface UseAgentControllerThreadsArgs {
 export function useAgentControllerThreads({
   agentControllerId,
   resourceId,
-  projectPath,
+  sessionScope,
   baseUrl = '',
   enabled = true,
 }: UseAgentControllerThreadsArgs) {
   const { session } = createAgentControllerClient({
     agentControllerId,
     resourceId,
-    scope: projectPath,
+    scope: sessionScope,
     baseUrl,
     enabled,
   });
 
   return useQuery({
-    queryKey: queryKeys.agentControllerThreads(agentControllerId, resourceId, projectPath),
+    queryKey: queryKeys.agentControllerThreads(agentControllerId, resourceId, sessionScope),
     queryFn: () =>
       session!.listThreads({
         limit: AGENT_CONTROLLER_THREAD_PAGE_SIZE,
-        tags: projectPath ? { projectPath } : undefined,
+        tags: sessionScope ? { sessionId: sessionScope } : undefined,
       }),
     enabled: enabled && Boolean(session),
   });

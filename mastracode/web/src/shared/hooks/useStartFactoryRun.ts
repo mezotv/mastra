@@ -116,21 +116,21 @@ export function useStartFactoryRun() {
       queryClient.setQueryData(queryKeys.factories(), (factories: Factory[] | undefined) =>
         factories?.map(factory => (factory.id === updatedFactory.id ? updatedFactory : factory)),
       );
-      const projectPath = deriveProjectPath(updatedFactory);
-      if (!projectPath) throw new Error('Could not resolve the new worktree path');
+      const sessionScope = deriveProjectPath(updatedFactory);
+      if (!sessionScope) throw new Error('Could not resolve the new session scope');
 
-      // Address the new worktree's own session; create it up front so a
-      // brand-new scope is seeded with its projectPath tag before the thread
-      // is created in it.
+      // Address the new session's own controller scope; create it up front so a
+      // brand-new scope is seeded with its sessionId tag before the thread is
+      // created in it.
       const { session } = createAgentControllerClient({
         agentControllerId: AGENT_CONTROLLER_ID,
         resourceId,
-        scope: projectPath,
+        scope: sessionScope,
         baseUrl,
         enabled: sessionEnabled,
       });
       const scopedSession = requireAgentControllerSession(session);
-      const created = await scopedSession.create({ tags: { projectPath } });
+      const created = await scopedSession.create({ tags: { sessionId: sessionScope } });
 
       // Worktrees hold a single conversation, so the run targets the session's
       // own thread. Bringing a brand-new scope online seeds it with a fresh
@@ -139,14 +139,14 @@ export function useStartFactoryRun() {
       // resumed a real thread (titled or with messages), i.e. a repeat run on
       // the same item, reuse that thread: the prompt lands as a follow-up
       // message instead of leaving a stray second thread in the worktree.
-      const threadId = await resolveRunThread(scopedSession, created.threadId, threadTitle, projectPath, threadTags);
+      const threadId = await resolveRunThread(scopedSession, created.threadId, threadTitle, sessionScope, threadTags);
       let kickoffMessage: string | undefined;
       if (invocation?.type === 'skill') {
-        const skillArguments = `${invocation.arguments.trim()}\n\nPrepared workspace context:\n- Worktree: ${projectPath}\n- Branch: ${branch}`;
+        const skillArguments = `${invocation.arguments.trim()}\n\nPrepared workspace context:\n- Session: ${sessionScope}\n- Branch: ${branch}`;
         const prepared = await prepareWorkspaceSkill({
           agentControllerId: AGENT_CONTROLLER_ID,
           resourceId,
-          scope: projectPath,
+          scope: sessionScope,
           name: invocation.skillName,
           arguments: skillArguments,
           baseUrl,
@@ -159,7 +159,7 @@ export function useStartFactoryRun() {
       // Refresh the new workspace's thread list before mounting the route so
       // route synchronization can bind the live session to the new thread.
       await queryClient.invalidateQueries({
-        queryKey: queryKeys.agentControllerThreads(AGENT_CONTROLLER_ID, resourceId, projectPath),
+        queryKey: queryKeys.agentControllerThreads(AGENT_CONTROLLER_ID, resourceId, sessionScope),
       });
 
       // Queue the kickoff before navigating so the destination page can claim it
@@ -168,7 +168,7 @@ export function useStartFactoryRun() {
       // (opening an empty session) there is nothing to dispatch — navigate and
       // let the user type the first message.
       if (kickoffMessage !== undefined) {
-        const kickoffCompleted = queueThreadPageKickoff({ resourceId, projectPath, threadId }, kickoffMessage);
+        const kickoffCompleted = queueThreadPageKickoff({ resourceId, projectPath: sessionScope, threadId }, kickoffMessage);
         void navigate(`/threads/${threadId}`);
         try {
           await kickoffCompleted;
@@ -193,7 +193,7 @@ export function useStartFactoryRun() {
         try {
           // One thread per item: stamp the run's ref onto every role the card
           // tracks so all refs share this threadId.
-          const ref = { projectPath, branch, threadId };
+          const ref = { sessionId: sessionScope, branch, threadId };
           const roles = new Set([...(workItem.existingRoles ?? []), workItem.role]);
           const sessions = Object.fromEntries([...roles].map(role => [role, ref]));
           if (workItem.id) {
@@ -244,7 +244,7 @@ async function resolveRunThread(
 ): Promise<string> {
   const extraTags = Object.entries(threadTags ?? {}).filter(([, value]) => value);
   if (extraTags.length > 0) {
-    const tags = { projectPath, ...Object.fromEntries(extraTags) };
+    const tags = { sessionId: projectPath, ...Object.fromEntries(extraTags) };
     const taggedThread = (await session.listThreads({ tags, limit: 20 }))[0];
     if (taggedThread) {
       await session.switchThread(taggedThread.id);

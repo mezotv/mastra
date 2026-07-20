@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 
 import { useApiConfig } from '../api/config';
-import { createWorktree, pushBranch } from '../../web/ui/domains/workspaces/services/github';
+import { createGithubSession, pushBranch } from '../../web/ui/domains/workspaces/services/github';
 
 /**
  * Mutation hooks for the per-project git write operations
@@ -24,7 +24,7 @@ export function useCreateWorktreeMutation() {
   const { baseUrl } = useApiConfig();
   return useMutation({
     mutationFn: ({ githubProjectId, branch, baseBranch }: CreateWorktreeVariables) =>
-      createWorktree(baseUrl, githubProjectId, branch, baseBranch),
+      createGithubSession(baseUrl, githubProjectId, branch, baseBranch),
   });
 }
 
